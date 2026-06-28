@@ -120,6 +120,13 @@ int main() {
     processSerial(cfg);
     CHECK(Serial.out.empty(), "empty line no response");
 
+    // 14. Backlog drain: several queued lines are ALL processed in one call so a
+    // config command can't get stuck behind stale live-poll queries.
+    feed("BATT\r\nRSSI\r\nCFG=apn=internet.it\r\n");
+    processSerial(cfg);
+    CHECK(Serial.out == "N/A\r\nN/A\r\nOK\r\n", "drains backlog and reaches CFG= in one call");
+    CHECK(cfg.apn == "internet.it", "CFG= behind backlog still applied");
+
     if (failures == 0) {
         printf("\nALL SERIAL_HANDLER TESTS PASSED\n");
         return 0;
