@@ -1,0 +1,30 @@
+services:
+  dev:
+    build: .
+    image: freematics-config-manager-dev
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo
+      - target-cache:/workspace/src-tauri/target
+    working_dir: /workspace
+    command: sleep infinity
+    stdin_open: true
+    tty: true
+
+  firmware:
+    build: ./firmware
+    image: freematics-firmware-builder
+    volumes:
+      - ./firmware:/firmware
+      - firmware-pio-core:/pio-core
+      - firmware-pio-work:/pio-work
+    working_dir: /firmware
+    command: sleep infinity
+    stdin_open: true
+    tty: true
+
+volumes:
+  cargo-cache:
+  target-cache:
+  firmware-pio-core:
+  firmware-pio-work:

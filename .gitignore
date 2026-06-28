@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+!firmware/dist/
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.AppImage
+*.AppImage.zsync
+*.exe
+
+# PlatformIO build artifacts (keep committed firmware/dist/ binaries)
+.pio/
+firmware/.pio/
+firmware/repo/.pio/
+firmware/repo/
+
+# Logs
+*.log
+logs/
+
+# Runtime / generated
+coverage/
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -1,0 +1,191 @@
+name: release
+
+on:
+  push:
+    branches: [release]
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build firmware Docker image
+        run: docker build -t freematics-firmware-builder ./firmware
+
+      - name: Run firmware build
+        run: |
+          docker run --rm \
+            -v "$PWD/firmware:/firmware" \
+            -e FREEMATICS_REF=master \
+            freematics-firmware-builder bash build.sh
+
+      - name: Copy artifact + update manifest
+        run: |
+          docker run --rm \
+            -v "$PWD/firmware:/firmware" \
+            -e COMMIT="${{ github.sha }}" \
+            freematics-firmware-builder bash dist/copy_artifact.sh
+
+      - name: Show firmware dist
+        run: |
+          echo "=== firmware/dist/manifest.json ==="
+          cat firmware/dist/manifest.json
+          echo
+          echo "=== firmware/dist/ contents ==="
+          ls -la firmware/dist/
+
+      - name: Upload firmware dist
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware-dist
+          path: firmware/dist/
+          if-no-files-found: error
+
+  build:
+    needs: firmware
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download firmware dist
+        uses: actions/download-artifact@v6
+        with:
+          name: firmware-dist
+          path: firmware/dist/
+
+      - name: Compute release version
+        id: version
+        shell: bash
+        run: |
+          # Base version is 1.0.0-beta; each deploy appends the run number
+          # as the pre-release identifier: 1.0.0-beta.1, 1.0.0-beta.2, ...
+          BASE="1.0.0-beta"
+          VERSION="${BASE}.${{ github.run_number }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VERSION}"
+
+      - name: Bump version in package.json
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.version = process.argv[1];
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          ' "${{ steps.version.outputs.version }}"
+
+      - name: Bump version in tauri.conf.json
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "src-tauri/tauri.conf.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.version = process.argv[1];
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          ' "${{ steps.version.outputs.version }}"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev \
+            libayatana-appindicator3-dev libudev-dev build-essential file pkg-config
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2.0"
+
+      - name: Build portable Tauri app
+        run: cargo tauri build
+
+      - name: Verify portable (no installer artifacts)
+        shell: bash
+        run: |
+          set -e
+          echo "Build output directory listing:"
+          ls -la src-tauri/target/release/ || true
+          # Portable-only: no NSIS / MSI / DEB / RPM must be produced.
+          if ls src-tauri/target/release/bundle/*/*.msi 2>/dev/null \
+                || ls src-tauri/target/release/bundle/nsis/*.exe 2>/dev/null \
+                || ls src-tauri/target/release/bundle/deb/*.deb 2>/dev/null \
+                || ls src-tauri/target/release/bundle/rpm/*.rpm 2>/dev/null; then
+            echo "ERROR: installer artifact found — bundle must be portable only"
+            exit 1
+          fi
+          echo "OK: no installer artifacts produced"
+
+      - name: Upload Windows portable exe
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v6
+        with:
+          name: freematics-config-manager-windows
+          path: src-tauri/target/release/freematics-config-manager.exe
+          if-no-files-found: error
+
+      - name: Upload Linux AppImage
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v6
+        with:
+          name: freematics-config-manager-linux
+          path: src-tauri/target/release/**/*.AppImage
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Compute release version
+        id: version
+        shell: bash
+        run: |
+          BASE="1.0.0-beta"
+          VERSION="${BASE}.${{ github.run_number }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "Freematics Config Manager ${{ steps.version.outputs.version }}"
+          prerelease: true
+          body: |
+            **Beta release** — automated build from ${{ github.sha }}.
+
+            Version: ${{ steps.version.outputs.version }}
+
+            ## Downloads
+            - **Windows:** `freematics-config-manager.exe` — download and double-click, no install required.
+            - **Linux:** `*.AppImage` — download, `chmod +x`, run, no install required.
+
+            > This is a pre-release build. Expect bugs and breaking changes before 1.0.0 stable.
+          files: artifacts/**/*

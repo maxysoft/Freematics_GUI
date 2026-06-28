@@ -1,0 +1,42 @@
+# VCS
+.git/
+.gitignore
+.github/
+
+# Dependencies (installed inside container)
+node_modules/
+
+# Build outputs
+dist/
+!firmware/dist/
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.AppImage
+*.AppImage.zsync
+*.exe
+
+# Vendored / cloned repos (fetched by build.sh inside container)
+firmware/repo/
+
+# PlatformIO build artifacts
+.pio/
+firmware/.pio/
+
+# Logs
+*.log
+logs/
+
+# Plans / docs not needed in image
+plans/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example

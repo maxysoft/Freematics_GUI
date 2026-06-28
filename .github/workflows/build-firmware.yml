@@ -1,0 +1,67 @@
+name: build-firmware
+
+# Rebuild the patched telelogger firmware whenever files under firmware/ change.
+# Builds in the firmware Docker container, copies the .bin into firmware/dist/,
+# updates manifest.json with a fresh SHA256, and commits the result back to the
+# branch via stefanzweifel/git-auto-commit-action.
+
+on:
+  push:
+    branches: [main, release]
+    paths:
+      - "firmware/**"
+  pull_request:
+    paths:
+      - "firmware/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build firmware Docker image
+        run: docker build -t freematics-firmware-builder ./firmware
+
+      - name: Run firmware build
+        run: |
+          docker run --rm \
+            -v "$PWD/firmware:/firmware" \
+            -e FREEMATICS_REF=master \
+            freematics-firmware-builder bash build.sh
+
+      - name: Copy artifact + update manifest
+        run: |
+          docker run --rm \
+            -v "$PWD/firmware:/firmware" \
+            -e COMMIT="${{ github.sha }}" \
+            freematics-firmware-builder bash dist/copy_artifact.sh
+
+      - name: Show updated dist
+        run: |
+          echo "=== firmware/dist/manifest.json ==="
+          cat firmware/dist/manifest.json
+          echo
+          echo "=== firmware/dist/ contents ==="
+          ls -la firmware/dist/
+
+      - name: Commit updated firmware/dist
+        if: github.event_name == 'push'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore(firmware): rebuild patched telelogger.bin [skip ci]"
+          file_pattern: "firmware/dist/*.bin firmware/dist/manifest.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+
+      - name: Upload firmware dist artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware-dist
+          path: firmware/dist/
+          if-no-files-found: error
