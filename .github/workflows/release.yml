@@ -116,10 +116,12 @@ jobs:
         run: npm ci
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2.0"
+        # Prebuilt binary via npm — avoids compiling tauri-cli from source on
+        # every run (slow, and flaky on transient crates.io network errors).
+        run: npm install -g @tauri-apps/cli@^2
 
       - name: Build portable Tauri app
-        run: cargo tauri build
+        run: tauri build
 
       - name: Verify portable (no installer artifacts)
         shell: bash
