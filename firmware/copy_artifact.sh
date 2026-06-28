@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Copy the freshly-built patched firmware.bin into firmware/dist/ and update
-# manifest.json with the real SHA256. Run inside the `firmware` container:
+# manifest.json with the real SHA256. Run inside the `firmware` container from
+# the firmware root (the script lives next to build.sh):
 #
 #   docker compose run --rm firmware bash copy_artifact.sh
 #
@@ -9,7 +10,10 @@
 #   COMMIT- git commit the binary was built from (default: 9b0a68d)
 set -euo pipefail
 
-DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
+# The dist dir is always <script dir>/dist (this script sits at the firmware
+# root, alongside build.sh).
+DIST_DIR="$(cd "$(dirname "$0")" && pwd)/dist"
+mkdir -p "$DIST_DIR"
 BIN_NAME="telelogger-patched.bin"
 DEST="${DIST_DIR}/${BIN_NAME}"
 MANIFEST="${DIST_DIR}/manifest.json"
