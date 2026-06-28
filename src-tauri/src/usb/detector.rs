@@ -45,15 +45,25 @@ impl UsbEnumerator for NusbEnumerator {
 }
 
 pub fn detect_devices_with<E: UsbEnumerator>(enumerator: &E) -> Vec<DeviceInfo> {
+    // Production path resolves the OS port name via serialport.
+    detect_devices_with_resolver(enumerator, resolve_port_path)
+}
+
+/// Core detection with an injectable port resolver. Keeping the resolver as a
+/// parameter lets unit tests run hermetically — the default `resolve_port_path`
+/// calls `serialport::available_ports()`, which is environment-dependent (it
+/// only returns a port when the physical device is actually attached).
+fn detect_devices_with_resolver<E, F>(enumerator: &E, resolve: F) -> Vec<DeviceInfo>
+where
+    E: UsbEnumerator,
+    F: Fn(&RawUsbDevice) -> Option<String>,
+{
     enumerator
         .list()
         .into_iter()
         .filter(|d| d.vendor_id == CH341_VENDOR_ID && d.product_id == CH341_PRODUCT_ID)
         .filter_map(|d| {
-            let port_path = match resolve_port_path(&d) {
-                Some(p) => p,
-                None => return None,
-            };
+            let port_path = resolve(&d)?;
             Some(DeviceInfo {
                 vendor_id: d.vendor_id,
                 product_id: d.product_id,
@@ -102,13 +112,20 @@ mod tests {
         }
     }
 
+    // Hermetic resolver: never touches the OS / serialport, so detection tests
+    // pass regardless of whether a physical device is attached to the host.
+    fn fake_resolver(_d: &RawUsbDevice) -> Option<String> {
+        Some("COM3".to_string())
+    }
+
     #[test]
     fn detects_ch341_by_vid_pid() {
         let e = MockEnumerator(vec![ch341()]);
-        let result = detect_devices_with(&e);
+        let result = detect_devices_with_resolver(&e, fake_resolver);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].vendor_id, CH341_VENDOR_ID);
         assert_eq!(result[0].product_id, CH341_PRODUCT_ID);
+        assert_eq!(result[0].port_path, "COM3");
     }
 
     #[test]
@@ -121,15 +138,22 @@ mod tests {
             serial_number: None,
         };
         let e = MockEnumerator(vec![other, ch341()]);
-        let result = detect_devices_with(&e);
+        let result = detect_devices_with_resolver(&e, fake_resolver);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].vendor_id, CH341_VENDOR_ID);
     }
 
     #[test]
+    fn skips_device_without_resolvable_port() {
+        let e = MockEnumerator(vec![ch341()]);
+        let result = detect_devices_with_resolver(&e, |_| None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
     fn handles_no_device() {
         let e = MockEnumerator(vec![]);
-        let result = detect_devices_with(&e);
+        let result = detect_devices_with_resolver(&e, fake_resolver);
         assert!(result.is_empty());
     }
 }

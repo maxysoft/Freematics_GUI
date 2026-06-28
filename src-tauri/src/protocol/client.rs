@@ -7,6 +7,10 @@ use std::time::Duration;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const DUMP_TERMINATOR: &str = "END";
+/// How many times to (re)send CFG_DUMP before giving up — rides out the
+/// ESP32 reboot that the USB-serial DTR/RTS toggle triggers on port open.
+const DUMP_ATTEMPTS: u32 = 3;
+const DUMP_RETRY_DELAY: Duration = Duration::from_millis(400);
 
 /// Redact secret values before a serial command is written to the log.
 /// `wpwd=hunter2` becomes `wpwd=***`. Only affects logging, not the wire.
@@ -79,7 +83,9 @@ impl<P: SerialPortOps> SerialClient<P> {
         self.port.set_timeout(READ_TIMEOUT)?;
         log::debug!("serial TX: {:?}", redact(cmd));
         self.port.write_all(cmd.as_bytes())?;
-        self.port.write_all(b"\r")?;
+        // Firmware reads a full line via readStringUntil('\n'), so commands must
+        // be terminated with a newline (CRLF for good measure).
+        self.port.write_all(b"\r\n")?;
         self.port.flush()?;
         let resp = self.read_line();
         match &resp {
@@ -95,10 +101,13 @@ impl<P: SerialPortOps> SerialClient<P> {
         loop {
             match self.port.read(&mut byte) {
                 Ok(0) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "no response from device",
-                    ))
+                    if out.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "no response from device",
+                        ));
+                    }
+                    break;
                 }
                 Ok(_) => {
                     if byte[0] == b'\r' || byte[0] == b'\n' {
@@ -108,6 +117,22 @@ impl<P: SerialPortOps> SerialClient<P> {
                         continue;
                     }
                     out.push(byte[0]);
+                }
+                // A read timeout surfaces as `Ok(0)` on some platforms (Linux)
+                // and as `TimedOut`/`WouldBlock` on others (Windows). Treat it
+                // uniformly as end-of-data: return the partial line if any, else
+                // signal "no response" so callers can retry/stop cleanly.
+                Err(e)
+                    if e.kind() == io::ErrorKind::TimedOut
+                        || e.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    if out.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "no response from device",
+                        ));
+                    }
+                    break;
                 }
                 Err(e) => return Err(e),
             }
@@ -122,7 +147,9 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     pub fn set(&mut self, key: &str, val: &str) -> io::Result<()> {
-        let cmd = format!("{key}={val}");
+        // Firmware's generic setter is `CFG=key=val` (only apn/ssid/wpwd have a
+        // bare-key legacy form); prefix everything so all fields are accepted.
+        let cmd = format!("CFG={key}={val}");
         let raw = self.send(&cmd)?;
         let parsed = parse_response(&raw)?;
         if parsed == RESPONSE_OK {
@@ -133,50 +160,68 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     pub fn dump_config(&mut self) -> io::Result<DeviceConfig> {
-        log::debug!("requesting config dump via {CMD_CFG_DUMP}");
         self.port.set_timeout(READ_TIMEOUT)?;
-        self.port.write_all(CMD_CFG_DUMP.as_bytes())?;
-        self.port.write_all(b"\r")?;
-        self.port.flush()?;
 
+        // Opening the port can reset the ESP32 (CH340 auto-reset). Retry the
+        // dump a few times so a still-booting device gets caught instead of
+        // failing on the first 2s window.
         let mut lines: Vec<String> = Vec::new();
-        loop {
-            match self.read_line() {
-                Ok(line) => {
-                    let trimmed = line.trim();
-                    if trimmed == DUMP_TERMINATOR || trimmed.is_empty() {
-                        if trimmed == DUMP_TERMINATOR {
+        let mut got_terminator = false;
+        for attempt in 1..=DUMP_ATTEMPTS {
+            log::debug!("config dump attempt {attempt}/{DUMP_ATTEMPTS} via {CMD_CFG_DUMP}");
+            self.port.write_all(CMD_CFG_DUMP.as_bytes())?;
+            self.port.write_all(b"\r\n")?;
+            self.port.flush()?;
+
+            lines.clear();
+            got_terminator = false;
+            loop {
+                match self.read_line() {
+                    Ok(line) => {
+                        let trimmed = line.trim();
+                        // Firmware ends a CFG_DUMP reply with "OK" (it has no
+                        // "END" terminator); accept either.
+                        if trimmed == DUMP_TERMINATOR || trimmed == RESPONSE_OK {
+                            got_terminator = true;
                             break;
                         }
-                        continue;
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        lines.push(line);
                     }
-                    lines.push(line);
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => {
+                        log::error!("config dump read error: {e}");
+                        return Err(e);
+                    }
                 }
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                    // No (more) data within the timeout. If we got nothing at
-                    // all this is the classic "device not responding" case.
-                    log::warn!(
-                        "config dump read timed out after {} line(s) (no {DUMP_TERMINATOR} terminator)",
-                        lines.len()
-                    );
-                    break;
-                }
-                Err(e) => {
-                    log::error!("config dump read error: {e}");
-                    return Err(e);
-                }
+            }
+
+            if !lines.is_empty() || got_terminator {
+                // Individual lines are NOT logged — they contain secrets
+                // (wifi/apn passwords, sim pin). Only the count is recorded.
+                log::info!("config dump produced {} line(s) on attempt {attempt}", lines.len());
+                break;
+            }
+            log::warn!("config dump attempt {attempt} got no response; device may still be booting");
+            if attempt < DUMP_ATTEMPTS {
+                std::thread::sleep(DUMP_RETRY_DELAY);
             }
         }
 
-        // Note: individual dump lines are NOT logged — they contain secrets
-        // (wifi/apn passwords, sim pin). Only the count is recorded.
-        log::info!("config dump produced {} line(s)", lines.len());
-        if lines.is_empty() {
-            log::warn!(
-                "config dump returned no lines — device did not respond to {CMD_CFG_DUMP} \
-                 (check baud, that the patched firmware is flashed, and that no other program holds the port)"
-            );
+        if lines.is_empty() && !got_terminator {
+            log::error!("device did not respond to {CMD_CFG_DUMP} after {DUMP_ATTEMPTS} attempts");
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "device did not respond to {CMD_CFG_DUMP} after {DUMP_ATTEMPTS} attempts — \
+                     check the patched firmware is flashed, the baud rate, and that no other \
+                     program is holding the port"
+                ),
+            ));
         }
+
         DeviceConfig::from_dump_lines(&lines).map_err(|e| {
             log::error!("failed to parse config dump ({} lines): {e}", lines.len());
             io::Error::new(io::ErrorKind::InvalidData, e)
@@ -197,7 +242,7 @@ impl<P: SerialPortOps> SerialClient<P> {
         let mut data = LiveData::default();
         data.battery_v = self.query_f32("BATT")?;
         data.rssi = self.query_i32("RSSI")?;
-        data.vin = self.query("VIN").unwrap_or_default();
+        data.vin = self.live_string("VIN");
         data.lat = self.query_f64("LAT")?;
         data.lng = self.query_f64("LNG")?;
         data.alt = self.query_f32("ALT")?;
@@ -205,30 +250,38 @@ impl<P: SerialPortOps> SerialClient<P> {
         data.spd = self.query_f32("SPD")?;
         data.crs = self.query_f32("CRS")?;
         data.uptime_ms = self.query_u64("UPTIME")?;
-        data.net_op = self.query("NET_OP").unwrap_or_default();
-        data.net_ip = self.query("NET_IP").unwrap_or_default();
+        data.net_op = self.live_string("NET_OP");
+        data.net_ip = self.live_string("NET_IP");
         Ok(data)
     }
 
-    // Live-data numeric queries. A failed *query* (I/O error, timeout, device
-    // "ERR") propagates so a disconnected device surfaces as an error. An
-    // unparseable *value* (the patched firmware returns "N/A" for live fields
-    // that have no reading yet) falls back to the type default instead of
-    // aborting the whole live-data poll.
+    // Live-data queries use the bare key (e.g. "BATT"), NOT "BATT?" — the
+    // firmware's live handler matches the bare token. A failed *send* (I/O
+    // error, timeout) propagates so a disconnected device surfaces as an error.
+    // An unparseable *value* (the patched firmware returns "N/A" for live fields
+    // with no reading yet) falls back to the type default instead of aborting
+    // the whole live-data poll.
+    fn live_string(&mut self, key: &str) -> String {
+        match self.send(key) {
+            Ok(v) if v.trim() != "N/A" => v.trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
     fn query_f32(&mut self, key: &str) -> io::Result<f32> {
-        Ok(self.query(key)?.trim().parse::<f32>().unwrap_or_default())
+        Ok(self.send(key)?.trim().parse::<f32>().unwrap_or_default())
     }
 
     fn query_f64(&mut self, key: &str) -> io::Result<f64> {
-        Ok(self.query(key)?.trim().parse::<f64>().unwrap_or_default())
+        Ok(self.send(key)?.trim().parse::<f64>().unwrap_or_default())
     }
 
     fn query_i32(&mut self, key: &str) -> io::Result<i32> {
-        Ok(self.query(key)?.trim().parse::<i32>().unwrap_or_default())
+        Ok(self.send(key)?.trim().parse::<i32>().unwrap_or_default())
     }
 
     fn query_u64(&mut self, key: &str) -> io::Result<u64> {
-        Ok(self.query(key)?.trim().parse::<u64>().unwrap_or_default())
+        Ok(self.send(key)?.trim().parse::<u64>().unwrap_or_default())
     }
 }
 
@@ -296,7 +349,7 @@ mod tests {
         let mut client = SerialClient::new(MockPort::new(vec![b"OK\r".to_vec()]));
         let _ = client.send("APN?");
         let mock = client.port_ref();
-        assert!(mock.write_buf().ends_with(b"\r"));
+        assert!(mock.write_buf().ends_with(b"\r\n"));
         assert!(mock.write_buf().windows(4).any(|w| w == b"APN?"));
     }
 
@@ -327,7 +380,8 @@ mod tests {
         let mut client = SerialClient::new(MockPort::new(vec![b"OK\r".to_vec()]));
         let _ = client.set("SSID", "my wifi network");
         let mock = client.port_ref();
-        let expected = b"SSID=my wifi network\r";
+        // Sets are sent as CFG=key=val terminated by CRLF.
+        let expected = b"CFG=SSID=my wifi network\r\n";
         assert!(mock.write_buf().windows(expected.len()).any(|w| w == expected));
     }
 

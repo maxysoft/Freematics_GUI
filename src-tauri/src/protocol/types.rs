@@ -227,14 +227,20 @@ impl DeviceConfig {
                 "ap_pwd" | "wifi_ap_password" => cfg.wifi_ap_password = val.to_string(),
                 "motion_thr" | "motion_threshold" => cfg.motion_threshold = parse_f32(val),
                 "jumpstart_v" | "jumpstart_voltage" => cfg.jumpstart_voltage = parse_i32(val),
-                "cooling_temp" | "cooling_down_temp" => cfg.cooling_down_temp = parse_i32(val),
-                "gnss_always_on" => cfg.gnss_always_on = parse_bool(val),
-                "gnss_reset_to" | "gnss_reset_timeout" => cfg.gnss_reset_timeout = parse_i32(val),
+                "cooling_t" | "cooling_temp" | "cooling_down_temp" => {
+                    cfg.cooling_down_temp = parse_i32(val)
+                }
+                "gnss_always" | "gnss_always_on" => cfg.gnss_always_on = parse_bool(val),
+                "gnss_reset_t" | "gnss_reset_to" | "gnss_reset_timeout" => {
+                    cfg.gnss_reset_timeout = parse_i32(val)
+                }
                 "max_obd_err" | "max_obd_errors" => cfg.max_obd_errors = parse_i32(val),
-                "sync_interval" | "server_sync_interval" => {
+                "srv_sync_int" | "sync_interval" | "server_sync_interval" => {
                     cfg.server_sync_interval = parse_i32(val)
                 }
-                "ping_interval" | "ping_back_interval" => cfg.ping_back_interval = parse_i32(val),
+                "pingback_int" | "ping_interval" | "ping_back_interval" => {
+                    cfg.ping_back_interval = parse_i32(val)
+                }
                 "psram" | "board_has_psram" => cfg.board_has_psram = parse_bool(val),
                 _ => {}
             }
@@ -265,16 +271,16 @@ impl DeviceConfig {
             ("ap_pwd".to_string(), self.wifi_ap_password.clone()),
             ("motion_thr".to_string(), self.motion_threshold.to_string()),
             ("jumpstart_v".to_string(), self.jumpstart_voltage.to_string()),
-            ("cooling_temp".to_string(), self.cooling_down_temp.to_string()),
-            ("gnss_always_on".to_string(), bool_str(self.gnss_always_on)),
-            ("gnss_reset_to".to_string(), self.gnss_reset_timeout.to_string()),
+            ("cooling_t".to_string(), self.cooling_down_temp.to_string()),
+            ("gnss_always".to_string(), bool_str(self.gnss_always_on)),
+            ("gnss_reset_t".to_string(), self.gnss_reset_timeout.to_string()),
             ("max_obd_err".to_string(), self.max_obd_errors.to_string()),
             (
-                "sync_interval".to_string(),
+                "srv_sync_int".to_string(),
                 self.server_sync_interval.to_string(),
             ),
             (
-                "ping_interval".to_string(),
+                "pingback_int".to_string(),
                 self.ping_back_interval.to_string(),
             ),
             ("psram".to_string(), bool_str(self.board_has_psram)),
@@ -377,12 +383,12 @@ mod tests {
             "ap_pwd",
             "motion_thr",
             "jumpstart_v",
-            "cooling_temp",
-            "gnss_always_on",
-            "gnss_reset_to",
+            "cooling_t",
+            "gnss_always",
+            "gnss_reset_t",
             "max_obd_err",
-            "sync_interval",
-            "ping_interval",
+            "srv_sync_int",
+            "pingback_int",
             "psram",
         ] {
             assert!(keys.contains(&expected), "missing key: {expected}");

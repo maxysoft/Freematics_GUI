@@ -24,9 +24,19 @@ impl RealSerialPort {
                 log::error!("failed to open serial port {port_path}: {e}");
                 io::Error::other(e.to_string())
             })?;
-        // Drain any boot/banner bytes the device emitted. On Windows especially,
-        // the USB-serial DTR/RTS toggle on open resets the ESP32, which then
-        // prints bootloader output; stale bytes would corrupt the first reply.
+        // Leave the ESP32 control lines in "run" mode. The CH340 auto-reset
+        // circuit wires RTS->EN and DTR->GPIO0; deasserting both keeps the MCU
+        // out of reset and out of the ROM bootloader so the app firmware runs.
+        if let Err(e) = inner.write_request_to_send(false) {
+            log::debug!("could not set RTS on {port_path}: {e}");
+        }
+        if let Err(e) = inner.write_data_terminal_ready(false) {
+            log::debug!("could not set DTR on {port_path}: {e}");
+        }
+        // The DTR/RTS toggle on open resets the ESP32 on many boards; give it a
+        // moment, then drain the bootloader banner so it can't corrupt the
+        // first reply.
+        std::thread::sleep(Duration::from_millis(150));
         match inner.clear(serialport::ClearBuffer::Input) {
             Ok(()) => log::debug!("cleared input buffer on {port_path}"),
             Err(e) => log::warn!("could not clear input buffer on {port_path}: {e}"),

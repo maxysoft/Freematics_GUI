@@ -200,6 +200,43 @@ describe("flash wizard", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("flashes without backup when the backup fails", async () => {
+    // Simulate a device with no patched firmware: the pre-flash backup fails.
+    mockedExport.mockRejectedValue(new Error("no response from device"));
+    const view = createFlashWizardView({
+      portPath: "/dev/ttyUSB0",
+      backupPath: "/tmp/bk.json",
+      onClose: () => {},
+    });
+    document.body.appendChild(view.el);
+    setChecked(view, true);
+    clickNext(view); // -> step 1, auto backup (fails)
+    await flush();
+    await flush();
+    await flush();
+
+    // A "Flash without backup" affordance appears instead of a disabled Next.
+    const skip = view.el.querySelector("#wizard-skip-backup") as HTMLButtonElement;
+    expect(skip).not.toBeNull();
+    skip.dispatchEvent(new Event("click")); // -> step 2 flash
+    await flush();
+    await flush();
+
+    // Drive flash to 100% to advance to the restore step.
+    const cb = (mockedListen as unknown as { _cb: (p: { percentage: number; stage: string }) => void })._cb;
+    cb({ percentage: 100, stage: "done" });
+    await flush();
+    await flush();
+    await flush();
+
+    // Restore is skipped (no backup), Done is enabled, importConfig never ran.
+    expect(mockedImport).not.toHaveBeenCalled();
+    expect(view.el.textContent).toContain("Backup was skipped");
+    const done = view.el.querySelector("#wizard-done") as HTMLButtonElement;
+    expect(done).not.toBeNull();
+    expect(done.disabled).toBe(false);
+  });
+
   it("cancel on step 1 closes wizard", () => {
     const onClose = vi.fn();
     const view = createFlashWizardView({

@@ -64,6 +64,7 @@ export function createFlashWizardView(
   let acknowledged = false;
   let backupDone = false;
   let backupError: string | null = null;
+  let backupSkipped = false;
   let flashProgress: FlashProgress | null = null;
   let flashError: string | null = null;
   let restoreDone = false;
@@ -120,6 +121,11 @@ export function createFlashWizardView(
           <p class="backup-status" role="status" aria-live="polite">
             ${backupDone ? "✓ Backup complete." : backupError ? escapeText(backupError) : "Click Next to start the backup."}
           </p>
+          ${
+            backupError
+              ? `<p class="muted">Couldn't read the current config — this is expected if the patched firmware isn't on the device yet. You can flash without a backup, but the current config won't be restored afterwards.</p>`
+              : ""
+          }
         </div>
       `;
     }
@@ -138,6 +144,15 @@ export function createFlashWizardView(
       `;
     }
     // step === 3
+    if (backupSkipped) {
+      return `
+        <div class="wizard-restore">
+          <p class="restore-status" role="status" aria-live="polite">
+            Backup was skipped — no config to restore. Configure the device from the dashboard after it reconnects.
+          </p>
+        </div>
+      `;
+    }
     return `
       <div class="wizard-restore">
         <p>Restoring config from:</p>
@@ -159,7 +174,14 @@ export function createFlashWizardView(
       return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button" ${acknowledged ? "" : "disabled"}>Next</button>`;
     }
     if (step === 1) {
-      return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button" ${backupDone ? "" : "disabled"}>Next</button>`;
+      if (backupDone) {
+        return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button">Next</button>`;
+      }
+      // Backup failed (e.g. no patched firmware yet): let the user flash anyway.
+      if (backupError) {
+        return `${cancelBtn}<button class="btn primary" id="wizard-skip-backup" type="button">Flash without backup</button>`;
+      }
+      return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button" disabled>Next</button>`;
     }
     if (step === 2) {
       return `<button class="btn ghost" id="wizard-cancel" type="button" disabled>Cancel</button>`;
@@ -177,6 +199,12 @@ export function createFlashWizardView(
       if (step === 0 || step === 1) close();
     });
     el.querySelector("#wizard-next")?.addEventListener("click", () => void onNext());
+    el.querySelector("#wizard-skip-backup")?.addEventListener("click", () => {
+      backupSkipped = true;
+      step = 2;
+      render();
+      void runFlash();
+    });
     el.querySelector("#wizard-done")?.addEventListener("click", () => {
       if (restoreDone) {
         opts.onRestored?.();
@@ -267,6 +295,12 @@ export function createFlashWizardView(
 
   async function runRestore(): Promise<void> {
     restoreError = null;
+    // Nothing was backed up — skip restore and let the user finish.
+    if (backupSkipped) {
+      restoreDone = true;
+      render();
+      return;
+    }
     render();
     try {
       await importConfig(opts.portPath, backupPath);
