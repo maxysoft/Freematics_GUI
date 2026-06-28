@@ -51,6 +51,37 @@ fi
 echo "    patched telelogger.ino:"
 grep -n 'serial_handler.h\|Config cfg\|processSerial' "${INO}" || true
 
+# Append the live-telemetry hook. This strong fcmLiveQuery() overrides the weak
+# default in serial_handler.cpp; placed at the end of telelogger.ino so the live
+# globals declared near its top (batteryVoltage, rssi, netop, gd, vin,
+# teleClient) and types (GPS_DATA, String) are in scope. If a global name ever
+# changes upstream the ESP32 build fails loudly here rather than silently
+# shipping zeros — but the weak default keeps host tests/un-patched builds green.
+if ! grep -q 'fcmLiveQuery' "${INO}"; then
+  cat >> "${INO}" <<'LIVEHOOK'
+
+// --- Freematics Config Manager: live telemetry hook (appended by build.sh) ---
+// Returns the current reading for a live query key, or "N/A" if unavailable.
+String fcmLiveQuery(const String& key) {
+  if (key == "BATT")   return batteryVoltage > 0 ? String(batteryVoltage, 1) : String("N/A");
+  if (key == "RSSI")   return rssi ? String((int)rssi) : String("N/A");
+  if (key == "VIN")    return vin[0] ? String(vin) : String("N/A");
+  if (key == "UPTIME") return String((unsigned long)millis());
+  if (key == "NET_OP") return netop.length() ? netop : String("N/A");
+  if (key == "NET_IP") { String ip = teleClient.cell.getIP(); return ip.length() ? ip : String("N/A"); }
+  if (gd && gd->ts) {
+    if (key == "LAT") return String(gd->lat, 6);
+    if (key == "LNG") return String(gd->lng, 6);
+    if (key == "ALT") return String(gd->alt, 1);
+    if (key == "SAT") return String((int)gd->sat);
+    if (key == "SPD") return String(gd->speed * 1.852f, 1); // knots -> km/h
+    if (key == "CRS") return String((int)gd->heading);
+  }
+  return "N/A";
+}
+LIVEHOOK
+fi
+
 echo "==> [4/4] Building"
 cd "${TELELOGGER_DIR}"
 

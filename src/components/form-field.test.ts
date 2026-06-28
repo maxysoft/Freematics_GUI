@@ -63,6 +63,31 @@ describe("fm-field", () => {
     expect(cb.checked).toBe(true);
   });
 
+  it("shows an info button that toggles the description", () => {
+    const f = document.createElement("fm-field");
+    f.setAttribute("name", "cell_apn");
+    f.setAttribute("label", "Cellular APN");
+    f.setAttribute("desc", "Access Point Name for the SIM data connection.");
+    document.body.appendChild(f);
+    const btn = f.querySelector(".info-btn") as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    const desc = f.querySelector(".desc") as HTMLElement;
+    expect(desc.hidden).toBe(true);
+    btn.click();
+    expect((f.querySelector(".desc") as HTMLElement).hidden).toBe(false);
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
+    btn.click();
+    expect((f.querySelector(".desc") as HTMLElement).hidden).toBe(true);
+  });
+
+  it("renders no info button without a desc", () => {
+    const f = document.createElement("fm-field");
+    f.setAttribute("name", "apn");
+    f.setAttribute("label", "APN");
+    document.body.appendChild(f);
+    expect(f.querySelector(".info-btn")).toBeNull();
+  });
+
   it("emits change event with name + value", () => {
     const f = document.createElement("fm-field");
     f.setAttribute("name", "ssid");

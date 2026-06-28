@@ -151,14 +151,15 @@ export function createDashboardView(opts: DashboardViewOptions): DashboardView {
       <article class="card live-detail">
         <h3>Telemetry</h3>
         <dl>
-          <dt>VIN</dt><dd>${escapeText(l?.vin ?? "—")}</dd>
+          <dt>VIN</dt><dd>${escapeText(orDash(l?.vin))}</dd>
           <dt>Lat / Lng</dt><dd>${l ? `${l.lat.toFixed(5)}, ${l.lng.toFixed(5)}` : "—"}</dd>
           <dt>Altitude</dt><dd>${l ? `${l.alt.toFixed(1)} m` : "—"}</dd>
           <dt>Course</dt><dd>${l ? `${l.crs.toFixed(0)}°` : "—"}</dd>
           <dt>Uptime</dt><dd>${l ? formatUptime(l.uptime_ms) : "—"}</dd>
-          <dt>Operator</dt><dd>${escapeText(l?.net_op ?? "—")}</dd>
-          <dt>IP</dt><dd>${escapeText(l?.net_ip ?? "—")}</dd>
+          <dt>Operator</dt><dd>${escapeText(orDash(l?.net_op))}</dd>
+          <dt>IP</dt><dd>${escapeText(orDash(l?.net_ip))}</dd>
         </dl>
+        <p class="muted live-note">Live values are reported by the device only while it is powered and running (engine on for OBD/battery, clear sky for GPS, modem registered for signal/operator). Fields with no current reading show 0 or “—”.</p>
       </article>
     `;
     return wrap;
@@ -231,6 +232,11 @@ function formatUptime(ms: number): string {
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
   return `${h}h ${m}m ${sec}s`;
+}
+
+// Empty / whitespace (e.g. firmware "N/A" mapped to "") renders as an em dash.
+function orDash(s: string | null | undefined): string {
+  return s && s.trim() ? s : "—";
 }
 
 function escapeText(s: string): string {

@@ -11,7 +11,7 @@ export interface FieldChangeEvent {
 
 export class FmField extends HTMLElement {
   static get observedAttributes(): string[] {
-    return ["label", "type", "help", "error", "value", "placeholder", "options", "name"];
+    return ["label", "type", "help", "error", "value", "placeholder", "options", "name", "desc"];
   }
 
   private get dom(): HTMLElement {
@@ -19,6 +19,7 @@ export class FmField extends HTMLElement {
   }
 
   private connected = false;
+  private descOpen = false;
 
   constructor() {
     super();
@@ -58,6 +59,7 @@ export class FmField extends HTMLElement {
   private render(): void {
     const label = this.getAttribute("label") ?? "";
     const help = this.getAttribute("help") ?? "";
+    const desc = this.getAttribute("desc") ?? "";
     const error = this.getAttribute("error") ?? "";
     const placeholder = this.getAttribute("placeholder") ?? "";
     const value = this.getAttribute("value") ?? "";
@@ -97,10 +99,19 @@ export class FmField extends HTMLElement {
         input[aria-invalid="true"], select[aria-invalid="true"] { border-color: var(--fm-danger, #ff5a5a); }
         .help { font-size: 0.72rem; color: var(--fm-muted, #9aa0a6); }
         .error { font-size: 0.72rem; color: var(--fm-danger, #ff5a5a); }
+        .label-row { display: flex; align-items: center; gap: 0.35rem; }
+        .info-btn { display: inline-flex; align-items: center; justify-content: center; width: 1.05rem; height: 1.05rem; padding: 0; border-radius: 50%; border: 1px solid var(--fm-border, #3a3a3a); background: transparent; color: var(--fm-muted, #9aa0a6); font-size: 0.68rem; font-style: italic; font-weight: 700; line-height: 1; cursor: pointer; }
+        .info-btn:hover, .info-btn:focus { color: var(--fm-accent, #4a9eff); border-color: var(--fm-accent, #4a9eff); outline: none; }
+        .desc { font-size: 0.74rem; color: var(--fm-text, #e0e0e0); background: var(--fm-input-bg, #2a2a2a); border-left: 2px solid var(--fm-accent, #4a9eff); padding: 0.35rem 0.5rem; border-radius: 3px; }
+        .desc[hidden] { display: none; }
       </style>
       <div class="row ${type === "checkbox" ? "check" : ""}">
-        <label for="${id}">${escapeText(label)}</label>
+        <div class="label-row">
+          <label for="${id}">${escapeText(label)}</label>
+          ${desc ? `<button type="button" class="info-btn" aria-label="Show description for ${escapeAttr(label)}" aria-expanded="${this.descOpen ? "true" : "false"}" aria-controls="${id}-desc">i</button>` : ""}
+        </div>
         ${control}
+        ${desc ? `<p class="desc" id="${id}-desc" ${this.descOpen ? "" : "hidden"}>${escapeText(desc)}</p>` : ""}
         ${help ? `<span class="help">${escapeText(help)}</span>` : ""}
         ${error ? `<span class="error" role="alert">${escapeText(error)}</span>` : ""}
       </div>
@@ -123,6 +134,17 @@ export class FmField extends HTMLElement {
             bubbles: true,
           })
         );
+      });
+    }
+
+    const info = this.dom.querySelector(".info-btn") as HTMLButtonElement | null;
+    if (info) {
+      info.addEventListener("click", (e) => {
+        e.preventDefault();
+        this.descOpen = !this.descOpen;
+        const d = this.dom.querySelector(".desc") as HTMLElement | null;
+        if (d) d.hidden = !this.descOpen;
+        info.setAttribute("aria-expanded", this.descOpen ? "true" : "false");
       });
     }
   }

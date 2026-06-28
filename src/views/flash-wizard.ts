@@ -350,7 +350,9 @@ export function createFlashWizardView(
         render();
         finishFlash();
       } else {
-        render();
+        // Update the bar/label in place — a full render() on every progress
+        // tick rebuilds the whole card and makes the screen flicker.
+        updateFlashProgress();
       }
     });
     try {
@@ -365,6 +367,23 @@ export function createFlashWizardView(
       flashError = `Flash failed: ${String(err)}`;
       render();
     }
+  }
+
+  // In-place progress update (no innerHTML rebuild) to avoid flicker on each
+  // flash://progress tick. Falls back to a full render if the bar isn't mounted.
+  function updateFlashProgress(): void {
+    if (step !== 2) return;
+    const pct = flashProgress?.percentage ?? 0;
+    const stage = flashProgress?.stage ?? "Starting…";
+    const bar = el.querySelector("#flash-bar") as HTMLElement | null;
+    if (!bar) {
+      render();
+      return;
+    }
+    bar.style.width = `${pct}%`;
+    el.querySelector(".progress-wrap")?.setAttribute("aria-valuenow", String(pct));
+    const label = el.querySelector("#flash-stage");
+    if (label) label.textContent = `${stage} — ${pct}%`;
   }
 
   function finishFlash(): void {

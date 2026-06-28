@@ -6,6 +6,15 @@
 #include "mock_serial.h"
 #endif
 
+// Live-telemetry hook. The REAL implementation is appended to telelogger.ino at
+// build time (see firmware/build.sh) where the live globals (batteryVoltage,
+// rssi, netop, gd, vin, teleClient, millis()) are in scope. This weak default
+// is linked when that override is absent (host tests, un-patched builds) so the
+// firmware always builds and simply reports "N/A" for every field.
+__attribute__((weak)) String fcmLiveQuery(const String&) {
+    return "N/A";
+}
+
 // Reads one line from Serial (terminated by \r or \n), dispatches command.
 // All responses terminated with \r\n.
 void processSerial(Config& cfg) {
@@ -81,20 +90,16 @@ void processSerial(Config& cfg) {
         }
     }
 
-    // Live data queries (delegate to firmware if available, else N/A) -------
+    // Live data queries — delegate to fcmLiveQuery() (real values on-device,
+    // "N/A" via the weak default for host tests / un-patched builds). -------
     static const char* live[] = {
         "BATT", "RSSI", "VIN", "LAT", "LNG", "ALT",
         "SAT", "SPD", "CRS", "UPTIME", "NET_OP", "NET_IP"
     };
     for (const char* name : live) {
         if (up == name) {
-#ifdef ARDUINO
-            // Delegated to existing telelogger functions if linked; else N/A.
-            // (Hook points added via telelogger_patch.cpp if available.)
-            Serial.print("N/A\r\n");
-#else
-            Serial.print("N/A\r\n");
-#endif
+            Serial.print(fcmLiveQuery(up));
+            Serial.print("\r\n");
             return;
         }
     }

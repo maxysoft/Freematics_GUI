@@ -95,6 +95,22 @@ describe("network view", () => {
     expect(pwdField?.getAttribute("error")).toContain("8");
   });
 
+  it("does not require ssid when WiFi station is disabled", async () => {
+    const cfg = sampleConfig();
+    cfg.enable_wifi = false;
+    cfg.wifi_ssid = "";
+    cfg.wifi_password = "";
+    const view = createNetworkView("/dev/ttyUSB0", cfg, () => {});
+    document.body.appendChild(view.el);
+    const form = view.el.querySelector("#cfg-form") as HTMLFormElement;
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    const ssidField = view.el.querySelector('fm-field[name="wifi_ssid"]');
+    expect(ssidField?.getAttribute("error")).toBe("");
+    expect(mockedSetConfig).toHaveBeenCalled();
+  });
+
   it("applies valid config", async () => {
     const cfg = sampleConfig();
     cfg.wifi_ssid = "goodssid";

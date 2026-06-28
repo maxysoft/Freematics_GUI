@@ -12,6 +12,8 @@ export interface FieldSpec {
   label: string;
   type: "text" | "password" | "number" | "select" | "checkbox";
   help?: string;
+  /** Longer explanation surfaced behind an "i" button next to the label. */
+  desc?: string;
   min?: number;
   max?: number;
   step?: number;
@@ -55,6 +57,7 @@ export function createFormView(opts: FormViewOptions): FormView {
           `type="${spec.type}"`,
         ];
         if (spec.help) attrs.push(`help="${escapeAttr(spec.help)}"`);
+        if (spec.desc) attrs.push(`desc="${escapeAttr(spec.desc)}"`);
         if (spec.placeholder) attrs.push(`placeholder="${escapeAttr(spec.placeholder)}"`);
         if (spec.type === "number") {
           if (spec.min !== undefined) attrs.push(`min="${spec.min}"`);
