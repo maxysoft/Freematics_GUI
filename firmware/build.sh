@@ -56,6 +56,15 @@ if ! grep -q 'fcmInConfig' "${INO}"; then
   awk '/processSerial\(cfg\);/{print; print "  if (fcmInConfig()) { delay(2); return; }"; next} {print}' \
     "${INO}" > "${INO}.tmp" && mv "${INO}.tmp" "${INO}"
 fi
+# Insert a keep-awake guard at the top of the !STATE_WORKING branch so a
+# connected configurator prevents standby(). Without it, a device with no OBD,
+# sitting still, enters standby()->waitMotion(-1) and blocks forever, killing
+# serial. fcmAwake() is refreshed by every command (and the app's keep-alive),
+# so the device only sleeps once the host disconnects.
+if ! grep -q 'fcmAwake' "${INO}"; then
+  awk '/if \(!state\.check\(STATE_WORKING\)\) \{/{print; print "    if (fcmAwake()) { delay(5); return; }"; next} {print}' \
+    "${INO}" > "${INO}.tmp" && mv "${INO}.tmp" "${INO}"
+fi
 echo "    patched telelogger.ino:"
 grep -n 'serial_handler.h\|Config cfg\|processSerial\|fcmInConfig' "${INO}" || true
 

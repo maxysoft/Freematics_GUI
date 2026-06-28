@@ -39,6 +39,25 @@ bool fcmInConfig() {
 #endif
 }
 
+// Keep-awake window: ANY serial command (config OR live query) means a host is
+// connected, so the loop() guard must NOT let the device enter standby()
+// (which blocks in waitMotion(-1) / a voltage wait until the device is moved,
+// killing serial). Refreshed on every received command; the desktop app also
+// pings periodically so the device stays responsive for the whole session.
+#ifndef FCM_AWAKE_WINDOW_MS
+#define FCM_AWAKE_WINDOW_MS 60000UL
+#endif
+
+volatile unsigned long fcmAwakeUntil = 0;
+
+bool fcmAwake() {
+#ifdef ARDUINO
+    return (long)(fcmAwakeUntil - millis()) > 0;
+#else
+    return false;
+#endif
+}
+
 // Dispatch a single received command line (terminated by \r or \n upstream).
 // All responses terminated with \r\n.
 static void handleCommandLine(Config& cfg, String line) {
@@ -46,6 +65,11 @@ static void handleCommandLine(Config& cfg, String line) {
     if (line.endsWith("\r")) line.remove(line.length() - 1);
     line.trim();
     if (line.length() == 0) return;
+
+#ifdef ARDUINO
+    // A command arrived -> a host is connected -> keep the device awake.
+    fcmAwakeUntil = millis() + FCM_AWAKE_WINDOW_MS;
+#endif
 
     String up = line;
     up.toUpperCase();
