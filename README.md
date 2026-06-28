@@ -149,6 +149,19 @@ The stock Freematics `telelogger` firmware exposes config only over BLE. This pr
 
 The overlay sources live in [`firmware/overlay/`](firmware/overlay/); `build.sh` clones the upstream Freematics repo, copies the overlay into `firmware_v5/telelogger/`, patches `telelogger.ino` to call `processSerial(cfg)`, and builds with PlatformIO. See [`firmware/README.md`](firmware/README.md) for the patch internals and [`docs/user-guide.md`](docs/user-guide.md) for the end-user walkthrough.
 
+### What the stored config actually changes
+
+The stock telelogger drives its behavior from compile-time `#define`s and a legacy NVS namespace; the config store this patch adds was originally **inert** (saved, but never read back at runtime). `build.sh` now also wires the store into the firmware at boot (`cfg.load()` + an appended `fcmApplyConfig()`), so a subset of settings take effect on the next boot after you save:
+
+| Takes effect (runtime) | Compile-time only (shown **read-only** in the app) |
+| --- | --- |
+| Cellular APN, APN user/pass, SIM PIN | Server host / port / protocol / path |
+| WiFi SSID + password (an SSID makes the device join WiFi) | GNSS mode, Storage, OBD/MEMS/HTTPD/BLE enables |
+| Sync & ping-back intervals | GNSS always-on, PSRAM flag, WiFi soft-AP |
+| Motion threshold, jump-start voltage, cool-down temp, GNSS reset timeout, max OBD errors | |
+
+Runtime-applied settings apply **on the next reboot** (the values are read during boot/cellular init). The compile-time-only fields are disabled in the UI with a lock note, since changing them requires editing `config.h` and rebuilding the firmware. Live queries also no longer call the modem's blocking `getIP()` — `NET_IP` reports the IP cached at connection time so a down modem can't stall the serial link.
+
 ## Serial communication & reliability
 
 The single most important thing to understand: **the patched firmware shares one UART between the telemetry logger and this config protocol.** While running, the firmware continuously prints its own async output (`[BUF] N samples …`, `[CELL] …`, GPS lines, boot/SD banners) and blocks for seconds on cellular/OBD/upload work. Naïvely reading "the next line" after sending a command therefore returns *telemetry chatter*, not the reply. Reliable config required fixes on **both** sides:
@@ -181,6 +194,8 @@ To prevent that, **any** serial command refreshes a 60 s *keep-awake* window (`f
 | Live data shows `0` / `—` / `N/A` on a bench | Expected — telemetry is paused while the device is kept awake for config, and there's no OBD/GPS on a desk. See [above](#live-data--device-sleep-behavior). |
 | Device stops responding after ~30 s | The device went into `standby()` (sleep). Fixed by the keep-awake firmware — **rebuild + reflash** so the device has it. If it has already slept, power-cycle it (a USB reconnect won't wake it because the app holds DTR/RTS low to avoid resetting it). |
 | `Apply` fails with "no response" / "unexpected response: …" | You are on firmware **older** than the reliability fixes. Rebuild the firmware (CI or `firmware/build.sh`), reflash via the app, and retry. |
+| `Apply` succeeds but the setting didn't change | Runtime-applied settings (APN, WiFi, SIM PIN, intervals, thresholds) take effect on the **next reboot** — power-cycle the device. Settings shown **read-only** (🔒) are compile-time only and can't be changed here. Requires firmware with the config-wiring patch (rebuild + reflash). |
+| `Apply` fails with `invalid type: string … expected i32` | Fixed — number fields are now coerced before sending. Update the app. |
 | `wifi_ssid` required even with Wi-Fi off | Fixed — SSID/password are only validated when *Enable Wi-Fi (station)* is checked. |
 | Flash screen flickers during progress | Fixed — the progress bar updates in place. |
 | Where are the debug logs? | The app uses `tauri-plugin-log`. On Windows: `%APPDATA%\com.maxynetwork.freematics-config-manager\logs\`; on Linux: `~/.local/share/com.maxynetwork.freematics-config-manager/logs/` (file name `freematics-config-manager`). Secrets (Wi-Fi/APN passwords, SIM PIN) are redacted. |

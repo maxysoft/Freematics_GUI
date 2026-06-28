@@ -14,6 +14,12 @@ export interface FieldSpec {
   help?: string;
   /** Longer explanation surfaced behind an "i" button next to the label. */
   desc?: string;
+  /**
+   * Field maps to a firmware compile-time #define the device can't change at
+   * runtime (e.g. server protocol, storage, OBD/MEMS toggles). Rendered
+   * disabled with a lock note so the UI doesn't imply it's settable.
+   */
+  readonly?: boolean;
   min?: number;
   max?: number;
   step?: number;
@@ -58,6 +64,7 @@ export function createFormView(opts: FormViewOptions): FormView {
         ];
         if (spec.help) attrs.push(`help="${escapeAttr(spec.help)}"`);
         if (spec.desc) attrs.push(`desc="${escapeAttr(spec.desc)}"`);
+        if (spec.readonly) attrs.push(`readonly`);
         if (spec.placeholder) attrs.push(`placeholder="${escapeAttr(spec.placeholder)}"`);
         if (spec.type === "number") {
           if (spec.min !== undefined) attrs.push(`min="${spec.min}"`);
@@ -84,7 +91,7 @@ export function createFormView(opts: FormViewOptions): FormView {
     el.querySelectorAll<FmField>("fm-field").forEach((f) => {
       f.addEventListener("change", (e: Event) => {
         const detail = (e as CustomEvent).detail as { name: string; value: string | boolean };
-        (working as Record<string, unknown>)[detail.name] = detail.value;
+        (working as Record<string, unknown>)[detail.name] = coerceValue(detail.name, detail.value);
       });
     });
 
@@ -99,6 +106,9 @@ export function createFormView(opts: FormViewOptions): FormView {
     // Validate.
     let firstError: { name: keyof DeviceConfig; msg: string } | null = null;
     for (const spec of opts.fields) {
+      // Read-only fields can't be edited, so their loaded value is whatever the
+      // device reported — never block Apply on it.
+      if (spec.readonly) continue;
       const validator = opts.validators?.[spec.name];
       const field = fieldEl(spec.name);
       field?.setAttribute("error", "");
@@ -127,6 +137,23 @@ export function createFormView(opts: FormViewOptions): FormView {
   function refresh(config: DeviceConfig): void {
     working = { ...config };
     render();
+  }
+
+  // <fm-field> emits string values for text/number/select inputs. The Rust
+  // DeviceConfig has numeric types (i32/u16/f32) for number fields, so a raw
+  // string like "80" fails serde deserialization ("invalid type: string,
+  // expected i32"). Coerce number fields to JS numbers here; leave everything
+  // else (text/select strings, checkbox booleans) as-is. A non-finite parse
+  // falls back to the string so the field's validator can surface the error.
+  function coerceValue(
+    name: string,
+    value: string | boolean
+  ): string | number | boolean {
+    if (typeof value !== "string") return value;
+    const spec = opts.fields.find((s) => s.name === name);
+    if (spec?.type !== "number") return value;
+    const n = Number(value);
+    return value.trim() !== "" && Number.isFinite(n) ? n : value;
   }
 
   render();
