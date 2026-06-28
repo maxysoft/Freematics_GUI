@@ -33,6 +33,23 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                // Beta diagnostics: verbose logging to a rotating file in the OS
+                // log dir, plus stdout (dev) and the webview console. On Windows
+                // the file lands in %APPDATA%\com.maxynetwork.freematics-config-manager\logs.
+                .level(log::LevelFilter::Debug)
+                // serialport's internals are noisy at debug; keep them at info.
+                .level_for("serialport", log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("freematics-config-manager".into()),
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::detect_devices_cmd,

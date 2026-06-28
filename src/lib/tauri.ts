@@ -97,10 +97,35 @@ function tauri(): TauriGlobal {
   return w.__TAURI__;
 }
 
+// Keys whose values must never be logged (passwords, PIN).
+const SECRET_ARG_KEYS = new Set([
+  "config",
+  "wifi_password",
+  "wifi_ap_password",
+  "apn_password",
+  "sim_pin",
+]);
+
+function redactArgs(args?: Record<string, unknown>): Record<string, unknown> {
+  if (!args) return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k] = SECRET_ARG_KEYS.has(k) ? "***" : v;
+  }
+  return out;
+}
+
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    return tauri().core.invoke<T>(cmd, args);
+    console.debug(`[invoke] ${cmd}`, redactArgs(args));
+    return tauri()
+      .core.invoke<T>(cmd, args)
+      .catch((err) => {
+        console.error(`[invoke] ${cmd} failed:`, err);
+        throw err;
+      });
   } catch (err) {
+    console.error(`[invoke] ${cmd} threw synchronously:`, err);
     return Promise.reject(err);
   }
 }

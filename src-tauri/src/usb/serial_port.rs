@@ -14,10 +14,24 @@ pub struct RealSerialPort {
 
 impl RealSerialPort {
     pub fn open(port_path: &str) -> io::Result<Self> {
-        let inner = serialport::new(port_path, BAUD_RATE)
+        log::debug!(
+            "opening serial port {port_path} @ {BAUD_RATE} baud (timeout {READ_TIMEOUT:?})"
+        );
+        let mut inner = serialport::new(port_path, BAUD_RATE)
             .timeout(READ_TIMEOUT)
             .open()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+            .map_err(|e| {
+                log::error!("failed to open serial port {port_path}: {e}");
+                io::Error::other(e.to_string())
+            })?;
+        // Drain any boot/banner bytes the device emitted. On Windows especially,
+        // the USB-serial DTR/RTS toggle on open resets the ESP32, which then
+        // prints bootloader output; stale bytes would corrupt the first reply.
+        match inner.clear(serialport::ClearBuffer::Input) {
+            Ok(()) => log::debug!("cleared input buffer on {port_path}"),
+            Err(e) => log::warn!("could not clear input buffer on {port_path}: {e}"),
+        }
+        log::info!("serial port {port_path} opened");
         Ok(Self { inner })
     }
 }

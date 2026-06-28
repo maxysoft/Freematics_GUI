@@ -103,12 +103,20 @@ export function createConnectView(opts: ConnectViewOptions): ConnectView {
 // Helper used by main.ts to fetch config after connect.
 export async function connectAndLoadConfig(
   portPath: string
-): Promise<{ port: string; config: Awaited<ReturnType<typeof getConfig>> | null }> {
+): Promise<{
+  port: string;
+  config: Awaited<ReturnType<typeof getConfig>> | null;
+  error: string | null;
+}> {
   try {
     const config = await getConfig(portPath);
-    return { port: portPath, config };
-  } catch {
-    return { port: portPath, config: null };
+    return { port: portPath, config, error: null };
+  } catch (err) {
+    // Surface the real backend reason (timeout, parse error, port busy) instead
+    // of swallowing it — the previous silent failure hid every diagnostic.
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(`connectAndLoadConfig(${portPath}) failed:`, error);
+    return { port: portPath, config: null, error };
   }
 }
 

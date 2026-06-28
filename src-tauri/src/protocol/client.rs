@@ -8,6 +8,17 @@ use std::time::Duration;
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 const DUMP_TERMINATOR: &str = "END";
 
+/// Redact secret values before a serial command is written to the log.
+/// `wpwd=hunter2` becomes `wpwd=***`. Only affects logging, not the wire.
+fn redact(cmd: &str) -> String {
+    if let Some((key, _)) = cmd.split_once('=') {
+        if matches!(key, "wpwd" | "ap_pwd" | "apn_pass" | "sim_pin") {
+            return format!("{key}=***");
+        }
+    }
+    cmd.to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveData {
     pub battery_v: f32,
@@ -66,10 +77,16 @@ impl<P: SerialPortOps> SerialClient<P> {
 
     pub fn send(&mut self, cmd: &str) -> io::Result<String> {
         self.port.set_timeout(READ_TIMEOUT)?;
+        log::debug!("serial TX: {:?}", redact(cmd));
         self.port.write_all(cmd.as_bytes())?;
         self.port.write_all(b"\r")?;
         self.port.flush()?;
-        self.read_line()
+        let resp = self.read_line();
+        match &resp {
+            Ok(line) => log::debug!("serial RX: {line:?}"),
+            Err(e) => log::warn!("serial RX failed after TX {:?}: {e}", redact(cmd)),
+        }
+        resp
     }
 
     fn read_line(&mut self) -> io::Result<String> {
@@ -116,6 +133,7 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     pub fn dump_config(&mut self) -> io::Result<DeviceConfig> {
+        log::debug!("requesting config dump via {CMD_CFG_DUMP}");
         self.port.set_timeout(READ_TIMEOUT)?;
         self.port.write_all(CMD_CFG_DUMP.as_bytes())?;
         self.port.write_all(b"\r")?;
@@ -134,13 +152,35 @@ impl<P: SerialPortOps> SerialClient<P> {
                     }
                     lines.push(line);
                 }
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e),
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    // No (more) data within the timeout. If we got nothing at
+                    // all this is the classic "device not responding" case.
+                    log::warn!(
+                        "config dump read timed out after {} line(s) (no {DUMP_TERMINATOR} terminator)",
+                        lines.len()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    log::error!("config dump read error: {e}");
+                    return Err(e);
+                }
             }
         }
 
-        DeviceConfig::from_dump_lines(&lines)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        // Note: individual dump lines are NOT logged — they contain secrets
+        // (wifi/apn passwords, sim pin). Only the count is recorded.
+        log::info!("config dump produced {} line(s)", lines.len());
+        if lines.is_empty() {
+            log::warn!(
+                "config dump returned no lines — device did not respond to {CMD_CFG_DUMP} \
+                 (check baud, that the patched firmware is flashed, and that no other program holds the port)"
+            );
+        }
+        DeviceConfig::from_dump_lines(&lines).map_err(|e| {
+            log::error!("failed to parse config dump ({} lines): {e}", lines.len());
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })
     }
 
     pub fn save_config(&mut self) -> io::Result<()> {

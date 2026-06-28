@@ -58,21 +58,32 @@ pub async fn list_ports() -> Result<Vec<String>, String> {
 
 #[tauri::command]
 pub async fn get_config(port_path: String) -> Result<DeviceConfig, String> {
-    with_serial(port_path, |client| {
+    log::info!("get_config: reading config from {port_path}");
+    let r = with_serial(port_path.clone(), |client| {
         client.dump_config().map_err(|e| e.to_string())
     })
-    .await
+    .await;
+    if let Err(e) = &r {
+        log::error!("get_config({port_path}) failed: {e}");
+    }
+    r
 }
 
 #[tauri::command]
 pub async fn set_config(port_path: String, config: DeviceConfig) -> Result<(), String> {
-    with_serial(port_path, move |client| {
+    log::info!("set_config: applying config to {port_path}");
+    let r = with_serial(port_path.clone(), move |client| {
         for (key, val) in config.to_set_commands() {
             client.set(&key, &val).map_err(|e| e.to_string())?;
         }
         client.save_config().map_err(|e| e.to_string())
     })
-    .await
+    .await;
+    match &r {
+        Ok(()) => log::info!("set_config({port_path}) ok"),
+        Err(e) => log::error!("set_config({port_path}) failed: {e}"),
+    }
+    r
 }
 
 #[tauri::command]

@@ -99,7 +99,7 @@ async function refreshConfigAfterRestore(): Promise<void> {
 }
 
 async function onConnect(portPath: string): Promise<void> {
-  const { config } = await connectAndLoadConfig(portPath);
+  const { config, error } = await connectAndLoadConfig(portPath);
   if (config) {
     appState.connect(portPath, config);
   } else {
@@ -108,7 +108,11 @@ async function onConnect(portPath: string): Promise<void> {
       const note = document.createElement("p");
       note.className = "err";
       note.setAttribute("role", "alert");
-      note.textContent = `Failed to read config from ${portPath}.`;
+      // Include the real backend reason so beta testers can report it; full
+      // detail also goes to the log file (see tauri-plugin-log).
+      note.textContent = error
+        ? `Failed to read config from ${portPath}: ${error}`
+        : `Failed to read config from ${portPath}.`;
       status.appendChild(note);
     }
   }
