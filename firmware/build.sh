@@ -85,7 +85,10 @@ String fcmLiveQuery(const String& key) {
   if (key == "VIN")    return vin[0] ? String(vin) : String("N/A");
   if (key == "UPTIME") return String((unsigned long)millis());
   if (key == "NET_OP") return netop.length() ? netop : String("N/A");
-  if (key == "NET_IP") { String ip = teleClient.cell.getIP(); return ip.length() ? ip : String("N/A"); }
+  // Use the IP cached at connection time (telelogger global `ip`), NOT a live
+  // cell.getIP() — that AT call blocks for up to ~15-45s when the modem is down
+  // and would wedge the shared config UART (observed as "no response").
+  if (key == "NET_IP") return ip.length() ? ip : String("N/A");
   if (gd && gd->ts) {
     if (key == "LAT") return String(gd->lat, 6);
     if (key == "LNG") return String(gd->lng, 6);
@@ -97,6 +100,95 @@ String fcmLiveQuery(const String& key) {
   return "N/A";
 }
 LIVEHOOK
+fi
+
+# ---------------------------------------------------------------------------
+# Config wiring: make the stored cfg actually drive device behavior.
+#
+# The stock telelogger reads config ONLY from config.h #defines + the legacy
+# "storage" NVS namespace (CELL_APN/WIFI_SSID/WIFI_PWD). The cfg store we added
+# (NVS namespace "cfg", written by the serial CFG= protocol) was completely
+# inert — nothing read it back. These patches:
+#   1. Declare runtime-override globals (before the macro-usage sites).
+#   2. Rewrite the runtime-tunable compile-time macros to those globals.
+#   3. Route the cellular credentials (sim_pin/apn_user/apn_pass) through cfg.
+#   4. cfg.load() + fcmApplyConfig(cfg) at boot (after loadConfig()).
+#   5. Append fcmApplyConfig() which pushes cfg into the live globals.
+# Compile-time-only fields (srv_proto, storage, obd/mems/ble/httpd, psram,
+# gnss mode) are NOT runtime-changeable and are left as #defines — the GUI
+# marks them read-only to match.
+echo "==> [3b/4] Wiring stored config into runtime behavior"
+if ! grep -q 'fcmMotionThr' "${INO}"; then
+  # 1. Runtime-override globals. Inserted right AFTER `#include "config.h"` (not
+  #    after `Config cfg;`, which is emitted before config.h) so the #defines
+  #    they seed from are already in scope. They precede every macro-usage site
+  #    rewritten below; each is seeded from its compile-time #define, then
+  #    overridden from cfg at boot. `done` guards a single insertion.
+  awk '!done && /#include "config.h"/{
+    print
+    print "// FCM runtime config overrides (seeded from config.h, set from cfg at boot)."
+    print "float fcmMotionThr = MOTION_THRESHOLD;"
+    print "int   fcmMaxObdErr = MAX_OBD_ERRORS;"
+    print "int   fcmGnssResetT = GNSS_RESET_TIMEOUT;"
+    print "int   fcmPingbackInt = PING_BACK_INTERVAL;"
+    print "int   fcmCoolingT = COOLING_DOWN_TEMP;"
+    print "float fcmJumpstartV = JUMPSTART_VOLTAGE;"
+    print "void fcmApplyConfig(Config&);"
+    done=1
+    next
+  } {print}' "${INO}" > "${INO}.tmp" && mv "${INO}.tmp" "${INO}"
+
+  # 2. Rewrite the runtime-tunable macro usages to the override globals.
+  #    (Idempotent: after replacement the LHS macro pattern is gone.)
+  sed -i 's/MOTION_THRESHOLD \* MOTION_THRESHOLD/fcmMotionThr * fcmMotionThr/g' "${INO}"
+  sed -i 's/obd\.errors >= MAX_OBD_ERRORS/obd.errors >= fcmMaxObdErr/g' "${INO}"
+  sed -i 's/lastGPStick > GNSS_RESET_TIMEOUT \* 1000/lastGPStick > fcmGnssResetT * 1000/g' "${INO}"
+  sed -i 's/1000L \* PING_BACK_INTERVAL/1000L * fcmPingbackInt/g' "${INO}"
+  sed -i 's/deviceTemp >= COOLING_DOWN_TEMP/deviceTemp >= fcmCoolingT/g' "${INO}"
+  sed -i 's/obd\.getVoltage() < JUMPSTART_VOLTAGE/obd.getVoltage() < fcmJumpstartV/g' "${INO}"
+fi
+
+# 3. Route cellular credentials through cfg (empty cfg field -> NULL = use
+#    modem/compile-time default, so an unset field never breaks attach).
+if ! grep -q 'cfg.sim_pin.c_str()' "${INO}"; then
+  sed -i 's/teleClient\.cell\.checkSIM(SIM_CARD_PIN)/teleClient.cell.checkSIM(cfg.sim_pin.length() ? cfg.sim_pin.c_str() : (const char*)0)/' "${INO}"
+fi
+if ! grep -q 'cfg.apn_user.c_str()' "${INO}"; then
+  sed -i 's/teleClient\.cell\.setup(apn, APN_USERNAME, APN_PASSWORD)/teleClient.cell.setup(apn, cfg.apn_user.length() ? cfg.apn_user.c_str() : (const char*)0, cfg.apn_pass.length() ? cfg.apn_pass.c_str() : (const char*)0)/' "${INO}"
+fi
+
+# 4. Load cfg + apply at boot, right after the legacy loadConfig() in setup().
+#    The `f` flag ensures we match the setup() loadConfig() (which follows the
+#    "storage" nvs_open), not the ones in the BLE command handlers above it.
+if ! grep -q 'fcmApplyConfig(cfg)' "${INO}"; then
+  awk '/nvs_open\("storage"/{f=1}
+       f && /loadConfig\(\);/{print; print "    cfg.load(); fcmApplyConfig(cfg);"; f=0; next}
+       {print}' "${INO}" > "${INO}.tmp" && mv "${INO}.tmp" "${INO}"
+fi
+
+# 5. Append fcmApplyConfig(): pushes cfg into the live globals/overrides. Placed
+#    at end of file so apn/wifiSSID/wifiPassword, syncInterval and the override
+#    globals are all in scope. Credentials overwrite only when non-empty so an
+#    unset field keeps the compile-time/legacy default; numerics treat >0 as set.
+# Guard on the definition signature ("Config& c"), not the bare forward
+# declaration ("Config&") inserted above, or the body would never be appended.
+if ! grep -q 'void fcmApplyConfig(Config& c)' "${INO}"; then
+  cat >> "${INO}" <<'APPLYHOOK'
+
+// --- Freematics Config Manager: apply stored config to runtime (build.sh) ---
+void fcmApplyConfig(Config& c) {
+  if (c.apn.length())  { strncpy(apn, c.apn.c_str(), sizeof(apn) - 1); apn[sizeof(apn) - 1] = 0; }
+  if (c.ssid.length()) { strncpy(wifiSSID, c.ssid.c_str(), sizeof(wifiSSID) - 1); wifiSSID[sizeof(wifiSSID) - 1] = 0; }
+  if (c.wpwd.length()) { strncpy(wifiPassword, c.wpwd.c_str(), sizeof(wifiPassword) - 1); wifiPassword[sizeof(wifiPassword) - 1] = 0; }
+  if (c.motion_thr > 0)   fcmMotionThr   = c.motion_thr;
+  if (c.max_obd_err > 0)  fcmMaxObdErr   = c.max_obd_err;
+  if (c.gnss_reset_t > 0) fcmGnssResetT  = c.gnss_reset_t;
+  if (c.pingback_int > 0) fcmPingbackInt = c.pingback_int;
+  if (c.cooling_t > 0)    fcmCoolingT    = c.cooling_t;
+  if (c.jumpstart_v > 0)  fcmJumpstartV  = c.jumpstart_v / 1000.0f; // mV -> V
+  if (c.srv_sync_int > 0) syncInterval   = (int32_t)c.srv_sync_int * 1000;
+}
+APPLYHOOK
 fi
 
 echo "==> [4/4] Building"

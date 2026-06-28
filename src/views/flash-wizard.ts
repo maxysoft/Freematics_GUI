@@ -189,7 +189,7 @@ export function createFlashWizardView(
         <p>Restoring config from:</p>
         <p class="mono backup-path">${escapeText(backupPath)}</p>
         <p class="restore-status" role="status" aria-live="polite">
-          ${restoreDone ? "✓ Restore complete." : restoreError ? escapeText(restoreError) : "Click Next to restore the config."}
+          ${restoreDone ? "✓ Restore complete." : restoreError ? escapeText(restoreError) : "Restoring config…"}
         </p>
       </div>
     `;

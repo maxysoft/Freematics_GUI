@@ -11,7 +11,7 @@ export interface FieldChangeEvent {
 
 export class FmField extends HTMLElement {
   static get observedAttributes(): string[] {
-    return ["label", "type", "help", "error", "value", "placeholder", "options", "name", "desc"];
+    return ["label", "type", "help", "error", "value", "placeholder", "options", "name", "desc", "readonly"];
   }
 
   private get dom(): HTMLElement {
@@ -65,8 +65,14 @@ export class FmField extends HTMLElement {
     const value = this.getAttribute("value") ?? "";
     const type = this.type;
     const name = this.name;
+    const readonly =
+      this.hasAttribute("readonly") && this.getAttribute("readonly") !== "false";
     const id = `fm-${name || Math.random().toString(36).slice(2)}`;
     const ariaInvalid = error ? "true" : "false";
+    // Read-only fields are disabled (greyed, no change events). These map to
+    // firmware compile-time #defines the device can't change at runtime, so the
+    // UI must not imply they're settable. A lock note explains why.
+    const dis = readonly ? "disabled" : "";
 
     let control = "";
     if (type === "select") {
@@ -76,16 +82,16 @@ export class FmField extends HTMLElement {
             `<option value="${escapeAttr(v)}" ${v === value ? "selected" : ""}>${escapeText(l)}</option>`
         )
         .join("");
-      control = `<select id="${id}" name="${escapeAttr(name)}" aria-invalid="${ariaInvalid}">${opts}</select>`;
+      control = `<select id="${id}" name="${escapeAttr(name)}" aria-invalid="${ariaInvalid}" ${dis}>${opts}</select>`;
     } else if (type === "checkbox") {
       const checked = value === "true" || value === "1";
-      control = `<input id="${id}" name="${escapeAttr(name)}" type="checkbox" ${checked ? "checked" : ""} aria-invalid="${ariaInvalid}" />`;
+      control = `<input id="${id}" name="${escapeAttr(name)}" type="checkbox" ${checked ? "checked" : ""} aria-invalid="${ariaInvalid}" ${dis} />`;
     } else {
       const extra =
         type === "number"
           ? `min="${escapeAttr(this.getAttribute("min") ?? "")}" max="${escapeAttr(this.getAttribute("max") ?? "")}" step="${escapeAttr(this.getAttribute("step") ?? "1")}"`
           : "";
-      control = `<input id="${id}" name="${escapeAttr(name)}" type="${escapeAttr(type)}" value="${escapeAttr(value)}" placeholder="${escapeAttr(placeholder)}" ${extra} aria-invalid="${ariaInvalid}" />`;
+      control = `<input id="${id}" name="${escapeAttr(name)}" type="${escapeAttr(type)}" value="${escapeAttr(value)}" placeholder="${escapeAttr(placeholder)}" ${extra} aria-invalid="${ariaInvalid}" ${dis} />`;
     }
 
     this.dom.innerHTML = `
@@ -104,6 +110,8 @@ export class FmField extends HTMLElement {
         .info-btn:hover, .info-btn:focus { color: var(--fm-accent, #4a9eff); border-color: var(--fm-accent, #4a9eff); outline: none; }
         .desc { font-size: 0.74rem; color: var(--fm-text, #e0e0e0); background: var(--fm-input-bg, #2a2a2a); border-left: 2px solid var(--fm-accent, #4a9eff); padding: 0.35rem 0.5rem; border-radius: 3px; }
         .desc[hidden] { display: none; }
+        input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
+        .lock { font-size: 0.7rem; color: var(--fm-muted, #9aa0a6); font-style: italic; }
       </style>
       <div class="row ${type === "checkbox" ? "check" : ""}">
         <div class="label-row">
@@ -111,6 +119,7 @@ export class FmField extends HTMLElement {
           ${desc ? `<button type="button" class="info-btn" aria-label="Show description for ${escapeAttr(label)}" aria-expanded="${this.descOpen ? "true" : "false"}" aria-controls="${id}-desc">i</button>` : ""}
         </div>
         ${control}
+        ${readonly ? `<span class="lock">🔒 Firmware build-time setting — not changeable here.</span>` : ""}
         ${desc ? `<p class="desc" id="${id}-desc" ${this.descOpen ? "" : "hidden"}>${escapeText(desc)}</p>` : ""}
         ${help ? `<span class="help">${escapeText(help)}</span>` : ""}
         ${error ? `<span class="error" role="alert">${escapeText(error)}</span>` : ""}
