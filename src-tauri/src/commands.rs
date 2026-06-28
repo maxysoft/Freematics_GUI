@@ -6,7 +6,7 @@ use crate::usb::serial_port::RealSerialPort;
 use crate::usb::{detect_devices, DeviceInfo};
 use serde::Serialize;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
@@ -178,14 +178,42 @@ pub async fn flash_firmware_cmd(
         .ok_or_else(|| "binary path is not valid UTF-8".to_string())?
         .to_string();
 
-    // Wrap the real runner so we can emit progress events. The runner's
-    // combined output is parsed for the final progress line; for true
-    // streaming we'd need a line-reading wrapper, but esptool completes
-    // quickly enough that a single end event is acceptable for v1.
-    let mut runner = CommandFlashRunner::new();
-    let result = flash_firmware_with(&mut runner, &port, &binary_str, &info.sha256);
+    // SHA-verify the bundled image before touching the device.
+    if !Path::new(&binary_str).exists() {
+        return Err(format!("firmware binary not found: {binary_str}"));
+    }
+    match crate::flash::verify_sha256(&binary_str, &info.sha256) {
+        Ok(true) => {}
+        Ok(false) => return Err("firmware SHA256 mismatch — refusing to flash".to_string()),
+        Err(e) => return Err(e),
+    }
+    let data = std::fs::read(&binary_str).map_err(|e| format!("failed to read firmware: {e}"))?;
 
-    match &result {
+    // Flash natively (espflash) off the async runtime; serialize against other
+    // serial access. Progress events stream to the `flash://progress` channel.
+    let emitter = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = serial_lock()
+            .lock()
+            .map_err(|_| "serial port lock poisoned".to_string())?;
+        let mut last_pct = 0u8;
+        crate::flash::flash_bin(&port, &data, |pct| {
+            if pct != last_pct {
+                last_pct = pct;
+                let _ = emitter.emit(
+                    "flash://progress",
+                    FlashProgressEvent {
+                        percentage: pct,
+                        stage: if pct >= 100 { "done".into() } else { "writing".into() },
+                    },
+                );
+            }
+        })
+    })
+    .await
+    .map_err(|e| format!("flash task failed: {e}"))?;
+
+    match result {
         Ok(()) => {
             let _ = app.emit(
                 "flash://progress",
@@ -204,7 +232,8 @@ pub async fn flash_firmware_cmd(
                     stage: format!("error: {e}"),
                 },
             );
-            Err(e.clone())
+            log::error!("flash_firmware_cmd failed: {e}");
+            Err(e)
         }
     }
 }

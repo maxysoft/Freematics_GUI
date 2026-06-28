@@ -72,15 +72,26 @@ function render(): void {
 
   if (appState.isFlashWizardOpen && appState.currentPort) {
     dashboardView?.pausePolling();
+    // Wizard opened while NOT connected = first-run setup (device has no
+    // firmware): skip the doomed pre-flash backup and, once flashed, connect.
+    const setupMode = !appState.isConnected;
+    const setupPort = appState.currentPort;
     flashWizardView = createFlashWizardView({
-      portPath: appState.currentPort,
+      portPath: setupPort,
       backupPath: appState.currentBackupPath ?? undefined,
+      skipBackup: setupMode,
       onClose: () => {
         flashWizardView = null;
         appState.closeFlashWizard();
       },
       onRestored: () => {
-        void refreshConfigAfterRestore();
+        if (setupMode) {
+          // Firmware just flashed; the device reboots into it — connect now.
+          appState.closeFlashWizard();
+          void onConnect(setupPort);
+        } else {
+          void refreshConfigAfterRestore();
+        }
       },
     });
     root.appendChild(flashWizardView.el);
@@ -105,15 +116,32 @@ async function onConnect(portPath: string): Promise<void> {
   } else {
     const status = connectView?.el.querySelector(".connect-actions");
     if (status) {
+      status.querySelector(".connect-error-block")?.remove();
+      const block = document.createElement("div");
+      block.className = "connect-error-block";
+
       const note = document.createElement("p");
       note.className = "err";
       note.setAttribute("role", "alert");
       // Include the real backend reason so beta testers can report it; full
       // detail also goes to the log file (see tauri-plugin-log).
       note.textContent = error
-        ? `Failed to read config from ${portPath}: ${error}`
-        : `Failed to read config from ${portPath}.`;
-      status.appendChild(note);
+        ? `Couldn't read config from ${portPath}: ${error}`
+        : `Couldn't read config from ${portPath}.`;
+
+      const hint = document.createElement("p");
+      hint.className = "muted";
+      hint.textContent =
+        "New device? It likely needs the Freematics Config Manager firmware. Set it up below — this flashes the firmware, then opens the configurator. No other software required.";
+
+      const setupBtn = document.createElement("button");
+      setupBtn.className = "btn primary";
+      setupBtn.type = "button";
+      setupBtn.textContent = "Set up device (flash firmware)";
+      setupBtn.addEventListener("click", () => appState.beginSetup(portPath));
+
+      block.append(note, hint, setupBtn);
+      status.appendChild(block);
     }
   }
 }

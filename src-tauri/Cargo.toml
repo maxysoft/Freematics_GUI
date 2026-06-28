@@ -19,6 +19,9 @@ nusb = "0.1"
 tokio = { version = "1", features = ["full"] }
 sha2 = "0.10"
 hex = "0.4"
+# Native, self-contained ESP32 flasher (no external esptool/python). cli feature
+# off — we only use the library API.
+espflash = { version = "4.4", default-features = false, features = ["serialport"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]

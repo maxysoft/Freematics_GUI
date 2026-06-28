@@ -125,6 +125,18 @@ export class AppState {
     this.emit();
   }
 
+  /// First-run setup: a device is present but has no patched firmware. Adopt
+  /// the port (without "connecting") and open the flash wizard so it can be
+  /// set up before any config read. Stays on the connect view underneath.
+  beginSetup(portPath: string): void {
+    this.portPath = portPath;
+    this.connected = false;
+    this.view = "connect";
+    this.flashWizardOpen = true;
+    this.backupPath = null;
+    this.emit();
+  }
+
   closeFlashWizard(): void {
     this.flashWizardOpen = false;
     this.backupPath = null;

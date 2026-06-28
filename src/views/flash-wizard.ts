@@ -24,6 +24,8 @@ export interface FlashWizardOptions {
   portPath: string;
   /** Override the backup path (tests). Defaults to a temp path. */
   backupPath?: string;
+  /** First-run setup: skip the pre-flash backup (device has no firmware yet). */
+  skipBackup?: boolean;
   /** Called when the wizard closes (Done or Cancel). */
   onClose: () => void;
   /** Called after restore completes so the caller can refresh config. */
@@ -216,6 +218,14 @@ export function createFlashWizardView(
   async function onNext(): Promise<void> {
     if (step === 0) {
       if (!acknowledged) return;
+      // First-run setup: no firmware to back up — go straight to flashing.
+      if (opts.skipBackup) {
+        backupSkipped = true;
+        step = 2;
+        render();
+        void runFlash();
+        return;
+      }
       step = 1;
       render();
       void runBackup();
