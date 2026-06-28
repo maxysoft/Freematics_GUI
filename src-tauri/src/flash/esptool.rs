@@ -107,6 +107,14 @@ pub fn verify_sha256(binary_path: &str, expected: &str) -> Result<bool, String> 
     Ok(actual.eq_ignore_ascii_case(expected.trim()))
 }
 
+/// Verify the SHA256 of in-memory `data` matches `expected` (hex, lowercase).
+pub fn verify_sha256_bytes(data: &[u8], expected: &str) -> bool {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let actual = hex::encode(hasher.finalize());
+    actual.eq_ignore_ascii_case(expected.trim())
+}
+
 /// Parsed progress event from esptool stderr.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlashProgress {
