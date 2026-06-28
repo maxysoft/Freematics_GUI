@@ -1,7 +1,7 @@
 {
   "version": "1.0.0-beta",
-  "sha256": "1d634aa7ecc3edbaba8819006f3897d7daea97134dd9e9b9c3475298f97062f8",
+  "sha256": "5553eef65f005b988869b9e4e9369318acdd9f402ec59c70146222c6eb8e237d",
   "binary": "telelogger-patched.bin",
-  "built_from_commit": "683dec0d94f07299fcfceb6aa36765a90e05ca90",
+  "built_from_commit": "fc7aad284afcc6f394eac01225635c0135ce51a4",
   "built_at": "2026-06-28"
 }
