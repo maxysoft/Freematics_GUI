@@ -7,4 +7,10 @@
 // All responses terminated with \r\n.
 void processSerial(Config& cfg);
 
+// True while a config command (dump/set/save/load) was received recently. The
+// main loop() uses this to skip its telemetry/upload work so the shared UART
+// stays quiet and responsive during configuration. Live-data queries do NOT
+// extend the window, so normal telemetry keeps flowing while polling.
+bool fcmInConfig();
+
 #endif
