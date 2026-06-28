@@ -3,9 +3,16 @@ use crate::protocol::types::DeviceConfig;
 use crate::usb::serial_port::SerialPortOps;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Wall-clock budget to find a definitive OK/ERR reply for one command attempt,
+/// reading past any interleaved async telemetry from the shared UART.
+const CMD_DEADLINE: Duration = Duration::from_secs(4);
+/// How many times to (re)send a command that expects OK/ERR before giving up.
+/// Rides over windows where the firmware is busy in its telemetry loop and does
+/// not service the serial line in time.
+const CMD_ATTEMPTS: u32 = 3;
 const DUMP_TERMINATOR: &str = "END";
 /// How many times to (re)send CFG_DUMP before giving up — rides out the
 /// ESP32 reboot that the USB-serial DTR/RTS toggle triggers on port open.
@@ -92,6 +99,9 @@ impl<P: SerialPortOps> SerialClient<P> {
 
     fn send_inner(&mut self, cmd: &str, quiet: bool) -> io::Result<String> {
         self.port.set_timeout(READ_TIMEOUT)?;
+        // Drop stale async telemetry the firmware printed before this command so
+        // it can't be mistaken for our reply (e.g. "[BUF] ... samples", "3.7").
+        let _ = self.port.clear_input();
         log::debug!("serial TX: {:?}", redact(cmd));
         self.port.write_all(cmd.as_bytes())?;
         // Firmware reads a full line via readStringUntil('\n'), so commands must
@@ -158,21 +168,96 @@ impl<P: SerialPortOps> SerialClient<P> {
         parse_response(&raw)
     }
 
+    /// Read lines until one matches `is_match`, the device falls silent (read
+    /// timeout / EOF), or `deadline` passes. Returns the matched line, or `None`
+    /// if no match was found this round. Non-matching lines are the firmware's
+    /// async telemetry sharing the UART — logged at debug and skipped.
+    fn read_until(
+        &mut self,
+        deadline: Instant,
+        is_match: impl Fn(&str) -> bool,
+    ) -> io::Result<Option<String>> {
+        loop {
+            match self.read_line() {
+                Ok(line) => {
+                    let t = line.trim();
+                    if is_match(t) {
+                        return Ok(Some(t.to_string()));
+                    }
+                    log::debug!("serial RX (chatter, skipped): {t:?}");
+                }
+                // Read timed out / no more data this round: not an error here —
+                // let the caller decide whether to re-send.
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e),
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+        }
+    }
+
+    /// Send a command that must be acknowledged with `OK` (or rejected with
+    /// `ERR`/`ERROR`), tolerating interleaved telemetry and retrying over busy
+    /// windows. An explicit `ERR` is final (no retry); silence is retried.
+    fn command_expect_ok(&mut self, cmd: &str) -> io::Result<()> {
+        let mut last: Option<io::Error> = None;
+        for attempt in 1..=CMD_ATTEMPTS {
+            self.port.set_timeout(READ_TIMEOUT)?;
+            let _ = self.port.clear_input();
+            log::debug!(
+                "serial TX (attempt {attempt}/{CMD_ATTEMPTS}): {:?}",
+                redact(cmd)
+            );
+            self.port.write_all(cmd.as_bytes())?;
+            self.port.write_all(b"\r\n")?;
+            self.port.flush()?;
+
+            let deadline = Instant::now() + CMD_DEADLINE;
+            let matched = self.read_until(deadline, |t| {
+                t.eq_ignore_ascii_case(RESPONSE_OK)
+                    || t.eq_ignore_ascii_case("ERR")
+                    || t.eq_ignore_ascii_case("ERROR")
+            })?;
+            match matched {
+                Some(resp) if resp.eq_ignore_ascii_case(RESPONSE_OK) => return Ok(()),
+                Some(resp) => {
+                    // Device understood the command and rejected it — retrying
+                    // the same command won't change the verdict.
+                    return Err(io::Error::other(format!(
+                        "device rejected command {:?} ({resp})",
+                        redact(cmd)
+                    )));
+                }
+                None => {
+                    log::warn!(
+                        "no OK/ERR for {:?} within {CMD_DEADLINE:?} (attempt {attempt}/{CMD_ATTEMPTS})",
+                        redact(cmd)
+                    );
+                    last = Some(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "no response from device",
+                    ));
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::TimedOut, "no response from device")
+        }))
+    }
+
     pub fn set(&mut self, key: &str, val: &str) -> io::Result<()> {
         // Firmware's generic setter is `CFG=key=val` (only apn/ssid/wpwd have a
         // bare-key legacy form); prefix everything so all fields are accepted.
-        let cmd = format!("CFG={key}={val}");
-        let raw = self.send(&cmd)?;
-        let parsed = parse_response(&raw)?;
-        if parsed == RESPONSE_OK {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("unexpected response: {parsed}")))
-        }
+        self.command_expect_ok(&format!("CFG={key}={val}"))
     }
 
     pub fn dump_config(&mut self) -> io::Result<DeviceConfig> {
         self.port.set_timeout(READ_TIMEOUT)?;
+        // Clear any async telemetry queued before the dump so the reply isn't
+        // polluted; only `key=value` lines are kept by from_dump_lines anyway,
+        // but draining keeps the per-attempt read windows clean.
+        let _ = self.port.clear_input();
 
         // Opening the port can reset the ESP32 (CH340 auto-reset). Retry the
         // dump a few times so a still-booting device gets caught instead of
@@ -241,13 +326,7 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     pub fn save_config(&mut self) -> io::Result<()> {
-        let raw = self.send(CMD_CFG_SAVE)?;
-        let parsed = parse_response(&raw)?;
-        if parsed == RESPONSE_OK {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("unexpected response: {parsed}")))
-        }
+        self.command_expect_ok(CMD_CFG_SAVE)
     }
 
     pub fn get_live_data(&mut self) -> io::Result<LiveData> {
@@ -421,6 +500,43 @@ mod tests {
         // Sets are sent as CFG=key=val terminated by CRLF.
         let expected = b"CFG=SSID=my wifi network\r\n";
         assert!(mock.write_buf().windows(expected.len()).any(|w| w == expected));
+    }
+
+    #[test]
+    fn set_skips_async_chatter_then_accepts_ok() {
+        // The shared UART interleaves telemetry ("[BUF] ...", a stray "3.7")
+        // before the real "OK"; set() must skip past it, not fail on it.
+        let resp = b"[BUF] 78 samples | 780 bytes | 26/32\r3.7\rOK\r".to_vec();
+        let mut client = SerialClient::new(MockPort::new(vec![resp]));
+        client.set("apn", "internet.it").expect("set should skip chatter and see OK");
+        let mock = client.port_ref();
+        let expected = b"CFG=apn=internet.it\r\n";
+        assert!(mock.write_buf().windows(expected.len()).any(|w| w == expected));
+    }
+
+    #[test]
+    fn set_reports_device_rejection_after_chatter() {
+        let resp = b"[CELL] activating...\rERR\r".to_vec();
+        let mut client = SerialClient::new(MockPort::new(vec![resp]));
+        let err = client.set("apn", "x").unwrap_err();
+        assert!(err.to_string().contains("rejected"), "got: {err}");
+    }
+
+    #[test]
+    fn set_times_out_when_only_chatter() {
+        // Never any OK/ERR — only telemetry. set() retries then fails cleanly
+        // (TimedOut), not "unexpected response: <chatter>".
+        let resp = b"[BUF] 1 samples | 2 bytes | 0/8\rmore noise\r".to_vec();
+        let mut client = SerialClient::new(MockPort::new(vec![resp]));
+        let err = client.set("apn", "x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn save_config_skips_chatter_then_ok() {
+        let resp = b"[BUF] 5 samples | 50 bytes | 1/8\rOK\r".to_vec();
+        let mut client = SerialClient::new(MockPort::new(vec![resp]));
+        assert!(client.save_config().is_ok());
     }
 
     #[test]

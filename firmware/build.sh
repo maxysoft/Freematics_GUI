@@ -48,8 +48,16 @@ if ! grep -q 'processSerial(cfg)' "${INO}"; then
   awk 'BEGIN{ins=0} /^void loop\(\)/{print; ins=1; next} ins==1 && /^\{/{print; print "  processSerial(cfg);"; ins=0; next} {print}' \
     "${INO}" > "${INO}.tmp" && mv "${INO}.tmp" "${INO}"
 fi
+# Insert the config-window guard right after processSerial(cfg);. While a config
+# command is active, skip the telemetry/upload work (process()/standby) so the
+# shared UART stays quiet and config replies are prompt. Live queries don't open
+# the window, so telemetry keeps running during live-data polling.
+if ! grep -q 'fcmInConfig' "${INO}"; then
+  awk '/processSerial\(cfg\);/{print; print "  if (fcmInConfig()) { delay(2); return; }"; next} {print}' \
+    "${INO}" > "${INO}.tmp" && mv "${INO}.tmp" "${INO}"
+fi
 echo "    patched telelogger.ino:"
-grep -n 'serial_handler.h\|Config cfg\|processSerial' "${INO}" || true
+grep -n 'serial_handler.h\|Config cfg\|processSerial\|fcmInConfig' "${INO}" || true
 
 # Append the live-telemetry hook. This strong fcmLiveQuery() overrides the weak
 # default in serial_handler.cpp; placed at the end of telelogger.ino so the live

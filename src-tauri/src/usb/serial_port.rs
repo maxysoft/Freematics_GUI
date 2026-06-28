@@ -6,6 +6,14 @@ const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub trait SerialPortOps: Read + Write + Send {
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()>;
+    /// Discard any buffered bytes the device sent before our next command. The
+    /// telelogger firmware shares this UART and prints async telemetry between
+    /// replies; draining first stops that stale chatter from being read as the
+    /// response to the command we are about to send. Default is a no-op so test
+    /// mocks need not implement it; real ports override.
+    fn clear_input(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct RealSerialPort {
@@ -66,6 +74,12 @@ impl SerialPortOps for RealSerialPort {
     fn set_timeout(&mut self, timeout: Duration) -> io::Result<()> {
         self.inner
             .set_timeout(timeout)
+            .map_err(|e| io::Error::other(e.to_string()))
+    }
+
+    fn clear_input(&mut self) -> io::Result<()> {
+        self.inner
+            .clear(serialport::ClearBuffer::Input)
             .map_err(|e| io::Error::other(e.to_string()))
     }
 }
