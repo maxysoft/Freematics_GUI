@@ -1,6 +1,6 @@
 use crate::backup::import::ImportOutcome;
 use crate::backup::{export as backup_export, import as backup_import, BackupFile};
-use crate::flash::{flash_firmware_with, CommandFlashRunner, FlashProgress, FlashRunner};
+use crate::flash::{flash_firmware_with, verify_sha256_bytes, CommandFlashRunner, FlashProgress, FlashRunner};
 use crate::protocol::{DeviceConfig, LiveData, SerialClient};
 use crate::usb::serial_port::RealSerialPort;
 use crate::usb::{detect_devices, DeviceInfo};
@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 
 /// Process-wide lock serializing access to serial ports. The OS does not give
 /// us exclusive access to a tty by default, so two concurrent commands opening
@@ -109,37 +109,17 @@ pub struct FlashProgressEvent {
     pub stage: String,
 }
 
-/// Resolve the bundled firmware dist directory.
-///
-/// In a packaged app the `firmware/dist/` files are bundled as Tauri
-/// resources, so we resolve them via the resource directory. In dev mode
-/// (or if resource resolution fails) we fall back to `firmware/dist/`
-/// relative to the current working directory.
-fn firmware_dist_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    match app
-        .path()
-        .resolve("firmware/dist", tauri::path::BaseDirectory::Resource)
-    {
-        Ok(p) => Ok(p),
-        Err(_) => {
-            // Dev fallback: look in the workspace root next to src-tauri.
-            let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-            Ok(cwd.join("firmware").join("dist"))
-        }
-    }
-}
+/// Firmware manifest embedded at compile time — no runtime file I/O required.
+static MANIFEST_JSON: &str = include_str!("../../firmware/dist/manifest.json");
 
-/// Read the bundled `manifest.json` and return its parsed contents.
+/// Firmware binary embedded at compile time — makes the portable exe fully self-contained.
+static FIRMWARE_BIN: &[u8] = include_bytes!("../../firmware/dist/telelogger-patched.bin");
+
+/// Return the parsed contents of the bundled firmware manifest.
 #[tauri::command]
-pub fn get_firmware_info(app: tauri::AppHandle) -> Result<FirmwareInfo, String> {
-    let manifest_path = firmware_dist_dir(&app)?.join("manifest.json");
-    let raw = fs::read_to_string(&manifest_path).map_err(|e| {
-        format!(
-            "failed to read manifest at {}: {e}",
-            manifest_path.display()
-        )
-    })?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+pub fn get_firmware_info(_app: tauri::AppHandle) -> Result<FirmwareInfo, String> {
+    let raw = MANIFEST_JSON;
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     Ok(FirmwareInfo {
         version: value
             .get("version")
@@ -185,25 +165,10 @@ pub async fn flash_firmware_cmd(
         }
         None => {
             let info = get_firmware_info(app.clone())?;
-            let binary_path = firmware_dist_dir(&app)?.join(&info.binary);
-            let binary_str = binary_path
-                .to_str()
-                .ok_or_else(|| "binary path is not valid UTF-8".to_string())?
-                .to_string();
-            // SHA-verify the bundled image before touching the device.
-            if !Path::new(&binary_str).exists() {
-                return Err(format!(
-                    "bundled firmware not found at {binary_str} — choose a .bin file to flash"
-                ));
+            if !verify_sha256_bytes(FIRMWARE_BIN, &info.sha256) {
+                return Err("bundled firmware SHA256 mismatch — build artifact may be corrupt".to_string());
             }
-            match crate::flash::verify_sha256(&binary_str, &info.sha256) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err("bundled firmware SHA256 mismatch — refusing to flash".to_string())
-                }
-                Err(e) => return Err(e),
-            }
-            std::fs::read(&binary_str).map_err(|e| format!("failed to read firmware: {e}"))?
+            FIRMWARE_BIN.to_vec()
         }
     };
     if data.is_empty() {

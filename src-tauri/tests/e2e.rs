@@ -52,49 +52,23 @@ fn bundle_targets_are_portable_only() {
     );
 }
 
-/// The firmware dist files must be declared as bundled resources so flashing
-/// works offline from the portable binary.
+/// Firmware dist files are embedded via include_str!/include_bytes! at compile
+/// time rather than bundled as Tauri resources, so the portable exe is fully
+/// self-contained with no runtime file resolution. Verify the source files
+/// exist in the repo so the compile-time includes don't break the build.
 #[test]
-fn firmware_dist_is_bundled_as_resource() {
-    let conf = read_conf();
-    let resources = conf
-        .get("bundle")
-        .and_then(|b| b.get("resources"))
-        .and_then(|r| r.as_array())
-        .expect("bundle.resources missing");
-    let resource_strs: Vec<String> = resources
-        .iter()
-        .map(|v| v.as_str().unwrap_or("").to_string())
-        .collect();
-
-    assert!(
-        resource_strs
-            .iter()
-            .any(|r| r.ends_with("firmware/dist/manifest.json")),
-        "bundle.resources must include firmware/dist/manifest.json: {resource_strs:?}"
-    );
-    assert!(
-        resource_strs
-            .iter()
-            .any(|r| r.ends_with("firmware/dist/telelogger-patched.bin")),
-        "bundle.resources must include firmware/dist/telelogger-patched.bin: {resource_strs:?}"
-    );
-}
-
-/// The firmware dist artifacts must physically exist in the repo so they get
-/// committed and bundled into the release.
-#[test]
-fn firmware_dist_files_exist() {
+fn firmware_dist_files_compile_time_embedded() {
     let dist = workspace_root().join("firmware/dist");
     assert!(
         dist.join("manifest.json").exists(),
-        "firmware/dist/manifest.json missing"
+        "firmware/dist/manifest.json missing — required for include_str! in commands.rs"
     );
     assert!(
         dist.join("telelogger-patched.bin").exists(),
-        "firmware/dist/telelogger-patched.bin missing"
+        "firmware/dist/telelogger-patched.bin missing — required for include_bytes! in commands.rs"
     );
 }
+
 
 /// The manifest must be valid JSON with the expected fields.
 #[test]
