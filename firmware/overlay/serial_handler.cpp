@@ -39,12 +39,9 @@ bool fcmInConfig() {
 #endif
 }
 
-// Reads one line from Serial (terminated by \r or \n), dispatches command.
+// Dispatch a single received command line (terminated by \r or \n upstream).
 // All responses terminated with \r\n.
-void processSerial(Config& cfg) {
-    if (!Serial.available()) return;
-
-    String line = Serial.readStringUntil('\n');
+static void handleCommandLine(Config& cfg, String line) {
     line.trim();
     if (line.endsWith("\r")) line.remove(line.length() - 1);
     line.trim();
@@ -135,4 +132,14 @@ void processSerial(Config& cfg) {
     }
 
     Serial.print("ERROR\r\n");
+}
+
+// Drain ALL queued command lines each call so a backlog (e.g. from rapid live
+// polling that the busy telemetry loop serviced one-per-iteration) can't delay
+// a config command. While a config command holds the window open, the loop()
+// guard suppresses telemetry, keeping this responsive and the UART quiet.
+void processSerial(Config& cfg) {
+    while (Serial.available()) {
+        handleCommandLine(cfg, Serial.readStringUntil('\n'));
+    }
 }

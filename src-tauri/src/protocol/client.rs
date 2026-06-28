@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// Wall-clock budget to find a definitive OK/ERR reply for one command attempt,
-/// reading past any interleaved async telemetry from the shared UART.
-const CMD_DEADLINE: Duration = Duration::from_secs(4);
+/// reading past any interleaved async telemetry from the shared UART. Generous
+/// so we ride over a busy telemetry/cellular cycle during which the firmware
+/// isn't servicing serial.
+const CMD_DEADLINE: Duration = Duration::from_secs(8);
 /// How many times to (re)send a command that expects OK/ERR before giving up.
 /// Rides over windows where the firmware is busy in its telemetry loop and does
 /// not service the serial line in time.
@@ -177,7 +179,17 @@ impl<P: SerialPortOps> SerialClient<P> {
         deadline: Instant,
         is_match: impl Fn(&str) -> bool,
     ) -> io::Result<Option<String>> {
+        // Bounds an unbounded chatter stream and, importantly, keeps a test mock
+        // (whose reads return instantly) from spinning until the wall-clock
+        // deadline. On real hardware each read_line blocks up to READ_TIMEOUT, so
+        // the deadline is the effective bound and this cap is never approached.
+        const MAX_READS: u32 = 512;
+        let mut reads = 0u32;
         loop {
+            if reads >= MAX_READS || Instant::now() >= deadline {
+                return Ok(None);
+            }
+            reads += 1;
             match self.read_line() {
                 Ok(line) => {
                     let t = line.trim();
@@ -186,13 +198,12 @@ impl<P: SerialPortOps> SerialClient<P> {
                     }
                     log::debug!("serial RX (chatter, skipped): {t:?}");
                 }
-                // Read timed out / no more data this round: not an error here —
-                // let the caller decide whether to re-send.
-                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                // A read timeout (no data this window) is NOT the end: the
+                // firmware may be busy in its telemetry/cellular cycle and answer
+                // shortly. Keep reading until the deadline rather than giving up
+                // on the first silent gap.
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
                 Err(e) => return Err(e),
-            }
-            if Instant::now() >= deadline {
-                return Ok(None);
             }
         }
     }
