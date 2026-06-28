@@ -87,6 +87,7 @@ describe("tauri wrappers", () => {
     await flashFirmware("/dev/ttyUSB0");
     expect(invoke).toHaveBeenCalledWith("flash_firmware_cmd", {
       port: "/dev/ttyUSB0",
+      firmwarePath: null,
     });
   });
 

@@ -1,19 +1,21 @@
 // Flash Firmware wizard: a 4-step modal overlay.
 //
 // Steps:
-//   1. Warning  — checkbox "I understand" gates Next.
-//   2. Backup   — exportConfig(port, backupPath); Next disabled until done.
-//   3. Flash    — flashFirmware(port) + listenFlashProgress; auto-advance.
-//   4. Restore  — importConfig(port, backupPath); Done closes the wizard.
+//   1. Warning  — pick firmware (bundled or a user .bin), ack gates Next.
+//   2. Backup   — choose location + back up config (skippable, never a dead-end).
+//   3. Flash    — flashFirmware(port, firmware) + listenFlashProgress.
+//   4. Restore  — importConfig(port, backupPath) unless backup was skipped.
 //
-// Cancel is allowed on steps 1 and 2 only. The wizard is driven by a small
-// state machine; views are pure re-renders off the current step + status.
+// Cancel is allowed on steps 1 and 2 only.
 
 import "../components/gauge";
 import {
   exportConfig,
   importConfig,
   flashFirmware,
+  getFirmwareInfo,
+  pickFirmwarePath,
+  pickSavePath,
   type ImportOutcome,
 } from "../lib/tauri";
 import { listenFlashProgress, type FlashProgress } from "../lib/events";
@@ -48,9 +50,7 @@ export function createFlashWizardView(
   el.setAttribute("aria-modal", "true");
   el.setAttribute("aria-label", "Flash Firmware");
 
-  // Resolved lazily before the backup runs: a real OS temp path from the
-  // backend in Tauri, or a /tmp fallback in browser/test. An explicit
-  // opts.backupPath (tests) always wins.
+  // Resolved lazily before the backup runs; explicit opts.backupPath (tests) wins.
   let backupPath = opts.backupPath ?? "";
 
   async function resolveBackupPath(): Promise<string> {
@@ -67,12 +67,18 @@ export function createFlashWizardView(
   let backupDone = false;
   let backupError: string | null = null;
   let backupSkipped = false;
+  let backupGen = 0; // generation token so a superseded backup can't clobber state
   let flashProgress: FlashProgress | null = null;
   let flashError: string | null = null;
   let restoreDone = false;
   let restoreError: string | null = null;
   let closed = false;
   let unsubFlash: (() => void) | null = null;
+
+  // Firmware selection: null path = bundled image; otherwise a user .bin.
+  let firmwarePath: string | null = null;
+  let firmwareLabel = "bundled patched firmware";
+  let firmwareAvailable = true; // is a flashable firmware available?
 
   function render(): void {
     el.innerHTML = `
@@ -102,16 +108,34 @@ export function createFlashWizardView(
 
   function renderStep(): string {
     if (step === 0) {
+      const fwReady = firmwareAvailable || firmwarePath !== null;
+      const fwText = firmwarePath
+        ? firmwareLabel
+        : firmwareAvailable
+          ? firmwareLabel
+          : "No firmware loaded — choose a .bin file to flash.";
       return `
         <div class="wizard-warn">
           <p class="warn-icon" aria-hidden="true">⚠</p>
           <p><strong>This will reflash your device firmware.</strong></p>
-          <p class="muted">A backup of the current config will be saved and restored after flashing. Do not disconnect power or the USB cable during the process.</p>
+          <p class="muted">${
+            opts.skipBackup
+              ? "This device has no readable config yet, so it will be flashed directly. "
+              : "A backup of the current config will be saved and restored after flashing. "
+          }Do not disconnect power or the USB cable during the process.</p>
+          <div class="wizard-fw">
+            <span class="fw-label">Firmware:</span>
+            <span class="fw-value ${fwReady ? "" : "err"}">${escapeText(fwText)}</span>
+            ${
+              isTauri()
+                ? `<button class="btn ghost" id="wizard-pick-fw" type="button">Choose .bin…</button>`
+                : ""
+            }
+          </div>
           <label class="wizard-check">
             <input type="checkbox" id="ack-check" ${acknowledged ? "checked" : ""} />
             <span>I understand the risks and want to continue.</span>
           </label>
-          ${backupError ? `<p class="err" role="alert">${escapeText(backupError)}</p>` : ""}
         </div>
       `;
     }
@@ -119,13 +143,18 @@ export function createFlashWizardView(
       return `
         <div class="wizard-backup">
           <p>Backing up current config to:</p>
-          <p class="mono backup-path">${escapeText(backupPath)}</p>
+          <p class="mono backup-path">${escapeText(backupPath || "(choosing location…)")}</p>
+          ${
+            isTauri()
+              ? `<button class="btn ghost" id="wizard-pick-backup" type="button">Change location…</button>`
+              : ""
+          }
           <p class="backup-status" role="status" aria-live="polite">
-            ${backupDone ? "✓ Backup complete." : backupError ? escapeText(backupError) : "Click Next to start the backup."}
+            ${backupDone ? "✓ Backup complete." : backupError ? escapeText(backupError) : "Backing up…"}
           </p>
           ${
             backupError
-              ? `<p class="muted">Couldn't read the current config — this is expected if the patched firmware isn't on the device yet. You can flash without a backup, but the current config won't be restored afterwards.</p>`
+              ? `<p class="muted">Couldn't read the current config — expected if the patched firmware isn't on the device yet. Change the location, retry, or skip (you can set the device up fresh after flashing).</p>`
               : ""
           }
         </div>
@@ -173,22 +202,26 @@ export function createFlashWizardView(
       : `<button class="btn ghost" id="wizard-cancel" type="button" disabled>Cancel</button>`;
 
     if (step === 0) {
-      return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button" ${acknowledged ? "" : "disabled"}>Next</button>`;
+      const fwReady = firmwareAvailable || firmwarePath !== null;
+      return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button" ${acknowledged && fwReady ? "" : "disabled"}>Next</button>`;
     }
     if (step === 1) {
-      if (backupDone) {
-        return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button">Next</button>`;
-      }
-      // Backup failed (e.g. no patched firmware yet): let the user flash anyway.
-      if (backupError) {
-        return `${cancelBtn}<button class="btn primary" id="wizard-skip-backup" type="button">Flash without backup</button>`;
-      }
-      return `${cancelBtn}<button class="btn primary" id="wizard-next" type="button" disabled>Next</button>`;
+      // Offer "Skip backup" until a good backup exists so the user is never
+      // stuck — but once it succeeds, don't tempt them to discard it (Next
+      // routes through restore).
+      const skipBtn = backupDone
+        ? ""
+        : `<button class="btn ghost" id="wizard-skip-backup" type="button">Skip backup</button>`;
+      return `${cancelBtn}${skipBtn}<button class="btn primary" id="wizard-next" type="button" ${backupDone ? "" : "disabled"}>Next</button>`;
     }
     if (step === 2) {
       return `<button class="btn ghost" id="wizard-cancel" type="button" disabled>Cancel</button>`;
     }
-    // step 3
+    // step 3 — never a dead-end: on restore failure offer Retry + Finish anyway
+    // (the device is already flashed, so the user must always be able to exit).
+    if (restoreError) {
+      return `<button class="btn ghost" id="wizard-retry-restore" type="button">Retry restore</button><button class="btn primary" id="wizard-done" type="button">Finish anyway</button>`;
+    }
     return `<button class="btn primary" id="wizard-done" type="button" ${restoreDone ? "" : "disabled"}>Done</button>`;
   }
 
@@ -207,11 +240,18 @@ export function createFlashWizardView(
       render();
       void runFlash();
     });
+    el.querySelector("#wizard-pick-fw")?.addEventListener("click", () => void onPickFirmware());
+    el.querySelector("#wizard-pick-backup")?.addEventListener("click", () => void onPickBackup());
+    el.querySelector("#wizard-retry-restore")?.addEventListener("click", () => {
+      restoreError = null;
+      render();
+      void runRestore();
+    });
     el.querySelector("#wizard-done")?.addEventListener("click", () => {
-      if (restoreDone) {
-        opts.onRestored?.();
-        close();
-      }
+      // Rendered enabled only when restore succeeded, or failed ("Finish
+      // anyway"); either way let the caller refresh/reconnect, then close.
+      opts.onRestored?.();
+      close();
     });
   }
 
@@ -247,19 +287,56 @@ export function createFlashWizardView(
     }
   }
 
+  async function onPickFirmware(): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      const p = await pickFirmwarePath();
+      if (p) {
+        firmwarePath = p;
+        firmwareLabel = baseName(p);
+        firmwareAvailable = true;
+        render();
+      }
+    } catch {
+      /* dialog cancelled / unavailable — ignore */
+    }
+  }
+
+  async function onPickBackup(): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      const p = await pickSavePath("freematics-backup.json");
+      if (p) {
+        backupPath = p;
+        backupDone = false;
+        render();
+        void runBackup();
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function runBackup(): Promise<void> {
+    // Generation token: if a newer backup starts (e.g. "Change location…"),
+    // this run's results are discarded so it can't clobber the current state.
+    const gen = ++backupGen;
     backupError = null;
+    backupDone = false;
     render();
     try {
       const path = await resolveBackupPath();
+      if (gen !== backupGen) return;
       render();
       await exportConfig(opts.portPath, path);
+      if (gen !== backupGen) return;
       backupDone = true;
     } catch (err) {
-      backupError = `Backup failed: ${String(err)}`;
+      if (gen !== backupGen) return;
+      backupError = `Backup failed: ${String(err)} — change the location, retry, or skip.`;
       backupDone = false;
     }
-    render();
+    if (gen === backupGen) render();
   }
 
   async function runFlash(): Promise<void> {
@@ -277,8 +354,7 @@ export function createFlashWizardView(
       }
     });
     try {
-      await flashFirmware(opts.portPath);
-      // If backend did not emit a 100% event, treat completion as success.
+      await flashFirmware(opts.portPath, firmwarePath);
       if (!closed && step === 2) {
         flashProgress = { percentage: 100, stage: "Complete" };
         render();
@@ -322,6 +398,25 @@ export function createFlashWizardView(
     render();
   }
 
+  // Best-effort: show which bundled firmware will be flashed, or flag if none.
+  async function loadFirmwareInfo(): Promise<void> {
+    if (!isTauri()) return;
+    try {
+      const info = await getFirmwareInfo();
+      // Don't clobber a firmware the user already picked while this was loading.
+      if (firmwarePath === null) {
+        firmwareLabel = `${info.binary}${info.version ? ` (v${info.version})` : ""}`;
+        firmwareAvailable = true;
+      }
+    } catch {
+      if (firmwarePath === null) {
+        firmwareAvailable = false;
+        firmwareLabel = "no bundled firmware found";
+      }
+    }
+    if (step === 0) render();
+  }
+
   function close(): void {
     if (closed) return;
     closed = true;
@@ -337,6 +432,7 @@ export function createFlashWizardView(
   }
 
   render();
+  void loadFirmwareInfo();
   return { el, unmount };
 }
 
@@ -345,6 +441,15 @@ function escapeText(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function baseName(p: string): string {
+  const parts = p.split(/[/\\]/);
+  return parts[parts.length - 1] || p;
+}
+
+function isTauri(): boolean {
+  return !!(window as unknown as { __TAURI__?: unknown }).__TAURI__;
 }
 
 // Invoke a Tauri command if the bridge is present, else null (browser/test).

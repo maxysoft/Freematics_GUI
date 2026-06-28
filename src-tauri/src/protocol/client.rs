@@ -80,6 +80,17 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     pub fn send(&mut self, cmd: &str) -> io::Result<String> {
+        self.send_inner(cmd, false)
+    }
+
+    /// Like `send` but logs failures at debug, not warn. Used for best-effort
+    /// live-data polling where a no-response (e.g. no OBD link) is expected and
+    /// should not spam the log.
+    pub fn send_quiet(&mut self, cmd: &str) -> io::Result<String> {
+        self.send_inner(cmd, true)
+    }
+
+    fn send_inner(&mut self, cmd: &str, quiet: bool) -> io::Result<String> {
         self.port.set_timeout(READ_TIMEOUT)?;
         log::debug!("serial TX: {:?}", redact(cmd));
         self.port.write_all(cmd.as_bytes())?;
@@ -90,6 +101,7 @@ impl<P: SerialPortOps> SerialClient<P> {
         let resp = self.read_line();
         match &resp {
             Ok(line) => log::debug!("serial RX: {line:?}"),
+            Err(e) if quiet => log::debug!("serial RX (quiet) after TX {:?}: {e}", redact(cmd)),
             Err(e) => log::warn!("serial RX failed after TX {:?}: {e}", redact(cmd)),
         }
         resp
@@ -239,20 +251,28 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     pub fn get_live_data(&mut self) -> io::Result<LiveData> {
-        let mut data = LiveData::default();
-        data.battery_v = self.query_f32("BATT")?;
-        data.rssi = self.query_i32("RSSI")?;
-        data.vin = self.live_string("VIN");
-        data.lat = self.query_f64("LAT")?;
-        data.lng = self.query_f64("LNG")?;
-        data.alt = self.query_f32("ALT")?;
-        data.sat = self.query_i32("SAT")?;
-        data.spd = self.query_f32("SPD")?;
-        data.crs = self.query_f32("CRS")?;
-        data.uptime_ms = self.query_u64("UPTIME")?;
-        data.net_op = self.live_string("NET_OP");
-        data.net_ip = self.live_string("NET_IP");
-        Ok(data)
+        // Best-effort: the telelogger firmware shares this serial line and prints
+        // its own async status (e.g. "[CELL] Activating..."), and a field may
+        // simply have no reading (no OBD link -> BATT times out). So every field
+        // is read independently and tolerantly — a miss yields the default, never
+        // an error that would abort the whole poll and trigger a retry storm.
+        // The FIRST field that does not respond (timeout) short-circuits and
+        // returns the partial result, so an idle/unresponsive device costs ~one
+        // 2s timeout per poll rather than ~24s (12 fields × 2s) holding the port.
+        let mut d = LiveData::default();
+        d.battery_v = match self.live_num("BATT") { Some(v) => v, None => return Ok(d) };
+        d.rssi = match self.live_num("RSSI") { Some(v) => v, None => return Ok(d) };
+        d.vin = match self.live_str("VIN") { Some(v) => v, None => return Ok(d) };
+        d.lat = match self.live_num("LAT") { Some(v) => v, None => return Ok(d) };
+        d.lng = match self.live_num("LNG") { Some(v) => v, None => return Ok(d) };
+        d.alt = match self.live_num("ALT") { Some(v) => v, None => return Ok(d) };
+        d.sat = match self.live_num("SAT") { Some(v) => v, None => return Ok(d) };
+        d.spd = match self.live_num("SPD") { Some(v) => v, None => return Ok(d) };
+        d.crs = match self.live_num("CRS") { Some(v) => v, None => return Ok(d) };
+        d.uptime_ms = match self.live_num("UPTIME") { Some(v) => v, None => return Ok(d) };
+        d.net_op = match self.live_str("NET_OP") { Some(v) => v, None => return Ok(d) };
+        d.net_ip = match self.live_str("NET_IP") { Some(v) => v, None => return Ok(d) };
+        Ok(d)
     }
 
     // Live-data queries use the bare key (e.g. "BATT"), NOT "BATT?" — the
@@ -261,28 +281,46 @@ impl<P: SerialPortOps> SerialClient<P> {
     // An unparseable *value* (the patched firmware returns "N/A" for live fields
     // with no reading yet) falls back to the type default instead of aborting
     // the whole live-data poll.
-    fn live_string(&mut self, key: &str) -> String {
-        match self.send(key) {
-            Ok(v) if v.trim() != "N/A" => v.trim().to_string(),
-            _ => String::new(),
+    /// Read a live string field. `None` = no response (caller short-circuits
+    /// the poll); `Some("")` = responded but empty / "N/A" / firmware chatter.
+    fn live_str(&mut self, key: &str) -> Option<String> {
+        match self.send_quiet(key) {
+            Ok(v) => {
+                let t = v.trim();
+                if t == "N/A" || is_status_noise(t) {
+                    Some(String::new())
+                } else {
+                    Some(t.to_string())
+                }
+            }
+            Err(_) => None,
         }
     }
 
-    fn query_f32(&mut self, key: &str) -> io::Result<f32> {
-        Ok(self.send(key)?.trim().parse::<f32>().unwrap_or_default())
+    /// Read a numeric live field. `None` = no response (caller short-circuits);
+    /// otherwise the parsed value, or the type default for garbage / chatter.
+    fn live_num<T: std::str::FromStr + Default>(&mut self, key: &str) -> Option<T> {
+        match self.send_quiet(key) {
+            Ok(v) => {
+                let t = v.trim();
+                if is_status_noise(t) {
+                    Some(T::default())
+                } else {
+                    Some(t.parse::<T>().unwrap_or_default())
+                }
+            }
+            Err(_) => None,
+        }
     }
+}
 
-    fn query_f64(&mut self, key: &str) -> io::Result<f64> {
-        Ok(self.send(key)?.trim().parse::<f64>().unwrap_or_default())
-    }
-
-    fn query_i32(&mut self, key: &str) -> io::Result<i32> {
-        Ok(self.send(key)?.trim().parse::<i32>().unwrap_or_default())
-    }
-
-    fn query_u64(&mut self, key: &str) -> io::Result<u64> {
-        Ok(self.send(key)?.trim().parse::<u64>().unwrap_or_default())
-    }
+/// Heuristic: is this serial line the firmware's own async status print rather
+/// than a clean answer to our query? (e.g. "[CELL] Activating...", "IP:...").
+fn is_status_noise(s: &str) -> bool {
+    s.is_empty()
+        || s.starts_with('[')
+        || s.contains(':')
+        || s.contains("...")
 }
 
 #[cfg(test)]

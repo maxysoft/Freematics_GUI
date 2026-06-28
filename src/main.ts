@@ -48,6 +48,7 @@ function render(): void {
   if (appState.currentView === "connect") {
     connectView = createConnectView({
       onConnect: (portPath) => void onConnect(portPath),
+      onSetup: (portPath) => appState.beginSetup(portPath),
     });
     main.appendChild(connectView.el);
     connectView.mount();
@@ -110,39 +111,16 @@ async function refreshConfigAfterRestore(): Promise<void> {
 }
 
 async function onConnect(portPath: string): Promise<void> {
+  connectView?.setConnecting(portPath);
   const { config, error } = await connectAndLoadConfig(portPath);
   if (config) {
     appState.connect(portPath, config);
   } else {
-    const status = connectView?.el.querySelector(".connect-actions");
-    if (status) {
-      status.querySelector(".connect-error-block")?.remove();
-      const block = document.createElement("div");
-      block.className = "connect-error-block";
-
-      const note = document.createElement("p");
-      note.className = "err";
-      note.setAttribute("role", "alert");
-      // Include the real backend reason so beta testers can report it; full
-      // detail also goes to the log file (see tauri-plugin-log).
-      note.textContent = error
-        ? `Couldn't read config from ${portPath}: ${error}`
-        : `Couldn't read config from ${portPath}.`;
-
-      const hint = document.createElement("p");
-      hint.className = "muted";
-      hint.textContent =
-        "New device? It likely needs the Freematics Config Manager firmware. Set it up below — this flashes the firmware, then opens the configurator. No other software required.";
-
-      const setupBtn = document.createElement("button");
-      setupBtn.className = "btn primary";
-      setupBtn.type = "button";
-      setupBtn.textContent = "Set up device (flash firmware)";
-      setupBtn.addEventListener("click", () => appState.beginSetup(portPath));
-
-      block.append(note, hint, setupBtn);
-      status.appendChild(block);
-    }
+    // Render the failure as connect-view state so the 2s device refresh can't
+    // wipe it; the "Set up device" action is wired via the onSetup option. The
+    // real backend reason is shown here and logged to the file.
+    connectView?.setConnecting(null);
+    connectView?.setError({ port: portPath, message: error ?? "" });
   }
 }
 

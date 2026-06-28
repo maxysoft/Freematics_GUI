@@ -255,6 +255,52 @@ body::before {
   background: rgba(255, 255, 255, 0.02);
 }
 .err { color: var(--fm-danger); }
+.connect-view { position: relative; }
+
+/* ---- Connecting overlay + spinner ------------------------------------- */
+.connect-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  text-align: center;
+  padding: 1.5rem;
+  background: rgba(11, 13, 17, 0.72);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  border-radius: var(--fm-radius);
+  z-index: 20;
+}
+.connect-overlay p { margin: 0; }
+.spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 3px solid var(--fm-track);
+  border-top-color: var(--fm-accent);
+  box-shadow: var(--fm-glow);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Wizard firmware row ---------------------------------------------- */
+.wizard-fw {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0.85rem 0 0.25rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--fm-border-soft);
+  border-radius: var(--fm-radius-sm);
+  background: rgba(255, 255, 255, 0.02);
+}
+.wizard-fw .fw-label { color: var(--fm-muted); font-size: 0.8rem; }
+.wizard-fw .fw-value { font-family: "Fira Code", ui-monospace, monospace; font-size: 0.82rem; flex: 1 1 auto; }
+.wizard-fw .fw-value.err { color: var(--fm-danger); }
 
 /* ---- Dashboard tabs --------------------------------------------------- */
 .tabbar { display: flex; gap: 0.15rem; border-bottom: 1px solid var(--fm-hairline); margin-bottom: 1.25rem; flex-wrap: wrap; }

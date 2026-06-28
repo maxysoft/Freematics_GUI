@@ -164,30 +164,52 @@ pub fn get_firmware_info(app: tauri::AppHandle) -> Result<FirmwareInfo, String> 
     })
 }
 
-/// Flash the bundled patched firmware to `port`, streaming progress events
-/// on the `flash://progress` channel.
+/// Flash firmware to `port`, streaming progress events on `flash://progress`.
+///
+/// With `firmware_path` = None the bundled, SHA-verified patched image is used.
+/// With Some(path) the user-selected `.bin` is flashed as-is (no SHA gate —
+/// it's their file). Errors clearly if no firmware is available.
 #[tauri::command]
 pub async fn flash_firmware_cmd(
     port: String,
+    firmware_path: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let info = get_firmware_info(app.clone())?;
-    let binary_path = firmware_dist_dir(&app)?.join(&info.binary);
-    let binary_str = binary_path
-        .to_str()
-        .ok_or_else(|| "binary path is not valid UTF-8".to_string())?
-        .to_string();
-
-    // SHA-verify the bundled image before touching the device.
-    if !Path::new(&binary_str).exists() {
-        return Err(format!("firmware binary not found: {binary_str}"));
+    let data = match firmware_path {
+        Some(p) => {
+            log::info!("flashing user-selected firmware: {p}");
+            if !Path::new(&p).exists() {
+                return Err(format!("firmware file not found: {p}"));
+            }
+            std::fs::read(&p).map_err(|e| format!("failed to read firmware {p}: {e}"))?
+        }
+        None => {
+            let info = get_firmware_info(app.clone())?;
+            let binary_path = firmware_dist_dir(&app)?.join(&info.binary);
+            let binary_str = binary_path
+                .to_str()
+                .ok_or_else(|| "binary path is not valid UTF-8".to_string())?
+                .to_string();
+            // SHA-verify the bundled image before touching the device.
+            if !Path::new(&binary_str).exists() {
+                return Err(format!(
+                    "bundled firmware not found at {binary_str} — choose a .bin file to flash"
+                ));
+            }
+            match crate::flash::verify_sha256(&binary_str, &info.sha256) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err("bundled firmware SHA256 mismatch — refusing to flash".to_string())
+                }
+                Err(e) => return Err(e),
+            }
+            std::fs::read(&binary_str).map_err(|e| format!("failed to read firmware: {e}"))?
+        }
+    };
+    if data.is_empty() {
+        return Err("firmware file is empty".to_string());
     }
-    match crate::flash::verify_sha256(&binary_str, &info.sha256) {
-        Ok(true) => {}
-        Ok(false) => return Err("firmware SHA256 mismatch — refusing to flash".to_string()),
-        Err(e) => return Err(e),
-    }
-    let data = std::fs::read(&binary_str).map_err(|e| format!("failed to read firmware: {e}"))?;
+    log::info!("flashing {} bytes to {port}", data.len());
 
     // Flash natively (espflash) off the async runtime; serialize against other
     // serial access. Progress events stream to the `flash://progress` channel.
@@ -321,6 +343,22 @@ pub async fn pick_open_path(app: tauri::AppHandle) -> Result<Option<String>, Str
         app.dialog()
             .file()
             .add_filter("JSON", &["json"])
+            .blocking_pick_file()
+            .and_then(|p| p.into_path().ok())
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("dialog task failed: {e}"))
+}
+
+/// Open a native dialog to pick a firmware `.bin` file (or `None` if cancelled).
+#[tauri::command]
+pub async fn pick_firmware_path(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("Firmware", &["bin"])
             .blocking_pick_file()
             .and_then(|p| p.into_path().ok())
             .map(|p| p.to_string_lossy().into_owned())

@@ -63,6 +63,7 @@ fn main() {
             commands::import_config_cmd,
             commands::pick_save_path,
             commands::pick_open_path,
+            commands::pick_firmware_path,
             commands::temp_backup_path
         ])
         .run(tauri::generate_context!())

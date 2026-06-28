@@ -6,6 +6,9 @@ vi.mock("../lib/tauri", () => ({
   exportConfig: vi.fn(),
   importConfig: vi.fn(),
   flashFirmware: vi.fn(),
+  getFirmwareInfo: vi.fn(),
+  pickFirmwarePath: vi.fn(),
+  pickSavePath: vi.fn(),
 }));
 
 vi.mock("../lib/events", () => ({
@@ -215,7 +218,9 @@ describe("flash wizard", () => {
     await flush();
     await flush();
 
-    // A "Flash without backup" affordance appears instead of a disabled Next.
+    // Failure path: the error is surfaced AND a "Skip backup" affordance is
+    // present (it is hidden once a backup succeeds, so this proves the failure).
+    expect(view.el.textContent).toContain("Backup failed");
     const skip = view.el.querySelector("#wizard-skip-backup") as HTMLButtonElement;
     expect(skip).not.toBeNull();
     skip.dispatchEvent(new Event("click")); // -> step 2 flash
@@ -235,6 +240,60 @@ describe("flash wizard", () => {
     const done = view.el.querySelector("#wizard-done") as HTMLButtonElement;
     expect(done).not.toBeNull();
     expect(done.disabled).toBe(false);
+  });
+
+  it("hides Skip backup once the backup succeeds", async () => {
+    mockedExport.mockResolvedValue(undefined);
+    const view = createFlashWizardView({
+      portPath: "/dev/ttyUSB0",
+      backupPath: "/tmp/bk.json",
+      onClose: () => {},
+    });
+    document.body.appendChild(view.el);
+    setChecked(view, true);
+    clickNext(view); // -> step 1, backup succeeds
+    await flush();
+    await flush();
+    await flush();
+    expect(view.el.textContent).toContain("Backup complete");
+    // A good backup must not be discardable via Skip; only Next (-> restore).
+    expect(view.el.querySelector("#wizard-skip-backup")).toBeNull();
+    const next = view.el.querySelector("#wizard-next") as HTMLButtonElement;
+    expect(next.disabled).toBe(false);
+  });
+
+  it("restore failure still lets the user finish (no dead-end)", async () => {
+    mockedExport.mockResolvedValue(undefined);
+    mockedImport.mockRejectedValue(new Error("device busy"));
+    const onClose = vi.fn();
+    const onRestored = vi.fn();
+    const view = createFlashWizardView({
+      portPath: "/dev/ttyUSB0",
+      backupPath: "/tmp/bk.json",
+      onClose,
+      onRestored,
+    });
+    document.body.appendChild(view.el);
+    setChecked(view, true);
+    clickNext(view); // -> step 1 backup (succeeds)
+    await flush();
+    await flush();
+    await flush();
+    clickNext(view); // -> step 2 flash
+    await flush();
+    await flush();
+    const cb = (mockedListen as unknown as { _cb: (p: { percentage: number; stage: string }) => void })._cb;
+    cb({ percentage: 100, stage: "done" }); // -> step 3 restore (rejects)
+    await flush();
+    await flush();
+    await flush();
+    // Restore failed: a Retry and an enabled "Finish anyway" exit must exist.
+    expect(view.el.querySelector("#wizard-retry-restore")).not.toBeNull();
+    const done = view.el.querySelector("#wizard-done") as HTMLButtonElement;
+    expect(done).not.toBeNull();
+    expect(done.disabled).toBe(false);
+    done.dispatchEvent(new Event("click"));
+    expect(onClose).toHaveBeenCalled();
   });
 
   it("cancel on step 1 closes wizard", () => {

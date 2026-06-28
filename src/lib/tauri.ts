@@ -154,8 +154,30 @@ export function getFirmwareInfo(): Promise<FirmwareInfo> {
   return invoke<FirmwareInfo>("get_firmware_info");
 }
 
-export function flashFirmware(portPath: string): Promise<void> {
-  return invoke<void>("flash_firmware_cmd", { port: portPath });
+export function flashFirmware(
+  portPath: string,
+  firmwarePath?: string | null
+): Promise<void> {
+  return invoke<void>("flash_firmware_cmd", {
+    port: portPath,
+    firmwarePath: firmwarePath ?? null,
+  });
+}
+
+/** Native dialog to pick a firmware .bin (Tauri only; null elsewhere). */
+export function pickFirmwarePath(): Promise<string | null> {
+  return invoke<string | null>("pick_firmware_path");
+}
+
+/** Native save dialog for a backup path (Tauri only; null elsewhere). */
+export function pickSavePath(defaultName: string): Promise<string | null> {
+  return invoke<string | null>("pick_save_path", { defaultName });
+}
+
+/** True if the Tauri bridge is present (i.e. running in the desktop app). */
+export function hasTauri(): boolean {
+  const w = window as unknown as { __TAURI__?: unknown };
+  return !!w.__TAURI__;
 }
 
 export function exportConfig(portPath: string, savePath: string): Promise<void> {

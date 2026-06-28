@@ -168,7 +168,9 @@ export function createDashboardView(opts: DashboardViewOptions): DashboardView {
     if (livePolling) return;
     livePolling = true;
     void pollLive();
-    timer = window.setInterval(() => void pollLive(), 1000);
+    // 3s cadence: each poll reopens the port and the firmware shares this serial
+    // line, so polling too fast contends with the device's own output.
+    timer = window.setInterval(() => void pollLive(), 3000);
   }
 
   function stopLivePolling(): void {
