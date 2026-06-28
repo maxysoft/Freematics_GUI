@@ -13,4 +13,9 @@ void processSerial(Config& cfg);
 // extend the window, so normal telemetry keeps flowing while polling.
 bool fcmInConfig();
 
+// True while ANY serial command (config or live query) was received recently.
+// The main loop() uses this to skip standby()/sleep so a connected configurator
+// keeps the device awake and serial-responsive instead of parking it.
+bool fcmAwake();
+
 #endif

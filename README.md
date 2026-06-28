@@ -4,13 +4,17 @@ A cross-platform **portable** desktop app for configuring, backing up, and flash
 
 Built with [Tauri 2](https://tauri.app/) (Rust backend + vanilla TypeScript frontend) and a patched [PlatformIO](https://platformio.org/) firmware build.
 
+> 🤖 **Made using AI.** This project was developed with AI assistance.
+> ⚠️ **Personal use / experimental.** This software is built for personal use and may be unstable. Use at your own risk.
+
 ## Features
 
 - **USB autodetect** — automatically detects the Freematics ONE+ (CH341, VID `1a86` / PID `7523`) on Windows (`COM*`) and Linux (`/dev/ttyUSB*`).
-- **Full config management** — read and write the complete device parameter set over an AT-style serial protocol: cellular APN, Wi-Fi, server endpoint, GNSS mode, storage, OBD/MEMS toggles, SIM PIN, motion threshold, intervals, and more.
-- **Backup & restore** — export the live config to a versioned JSON file (with the firmware SHA256 stamped in) and re-import it onto the same or another device.
-- **One-click firmware flash** — reflashes a patched `telelogger` firmware that exposes the serial command protocol, bundled inside the app so flashing works fully offline.
-- **Live telemetry** — battery voltage, RSSI, VIN, GPS fix, network operator/IP.
+- **Full config management** — read and write the complete device parameter set over an AT-style serial protocol: cellular APN, Wi-Fi, server endpoint, GNSS mode, storage, OBD/MEMS toggles, SIM PIN, motion threshold, intervals, and more. Every parameter has an inline **“i” description** explaining what it does.
+- **First-run “Set up device”** — a brand-new device with no readable config can be configured using *only* this app: it flashes the patched firmware, then opens the configurator. No esptool, Python, or any other tool required.
+- **Native ESP32 flashing** — firmware is written with the [`espflash`](https://crates.io/crates/espflash) library compiled into the app (no `esptool.py`/Python). The patched `telelogger.bin` is bundled inside the app, so flashing works fully offline; a user-supplied `.bin` can also be chosen in the flash wizard.
+- **Backup & restore** — export the live config to a versioned JSON file (with the firmware SHA256 stamped in) and re-import it onto the same or another device. You choose the backup location via a native file dialog.
+- **Live telemetry** — battery voltage, RSSI, VIN, GPS fix, network operator/IP — **when the device is actively running** (see [Live data & device sleep](#live-data--device-sleep-behavior)).
 - **Portable-only release** — Windows `.exe` and Linux `.AppImage`, no NSIS/MSI/DEB installers.
 
 ## Tech stack
@@ -36,7 +40,7 @@ Built with [Tauri 2](https://tauri.app/) (Rust backend + vanilla TypeScript fron
 │   │   ├── commands.rs      # Tauri command handlers
 │   │   ├── usb/             # CH341 detection + serial port
 │   │   ├── protocol/        # AT-style serial protocol client + config types
-│   │   ├── flash/           # esptool integration
+│   │   ├── flash/           # native espflash flasher (native.rs); esptool.rs is legacy
 │   │   └── backup/          # JSON export/import
 │   ├── tests/               # project_layout + e2e smoke tests
 │   └── tauri.conf.json      # portable bundle config (resources = firmware/dist)
@@ -134,16 +138,54 @@ Verify with `ls /dev/dri/` — you should see both `card0` and `renderD128`.
 
 The stock Freematics `telelogger` firmware exposes config only over BLE. This project ships a **patched** build that adds a serial command handler (`processSerial()`) mirroring the BLE protocol, plus an extended NVS-backed `Config` store covering every parameter the GUI can edit. New commands:
 
-| Command      | Purpose                                  |
-| ------------ | ---------------------------------------- |
-| `CFG?`       | Dump a single key                        |
-| `CFG=key=val`| Set a single key                         |
-| `CFG_DUMP`   | Dump the entire config as `key=val` lines|
-| `CFG_LOAD`   | Reload config from NVS                   |
-| `CFG_SAVE`   | Persist current config to NVS            |
-| `BATT`/`RSSI`/`VIN`/`LAT`/`LNG`/... | Live telemetry queries     |
+| Command      | Purpose                                  | Response |
+| ------------ | ---------------------------------------- | -------- |
+| `CFG_DUMP`   | Dump the entire config as `key=val` lines| `key=val` lines + `OK` |
+| `CFG=key=val`| Set a single key                         | `OK` / `ERR` |
+| `CFG_SAVE`   | Persist current config to NVS            | `OK` |
+| `CFG_LOAD`   | Reload config from NVS                   | `OK` |
+| `APN?` / `SSID?` / `WPWD?` | Legacy single-key query    | current value |
+| `BATT` `RSSI` `VIN` `LAT` `LNG` `ALT` `SAT` `SPD` `CRS` `UPTIME` `NET_OP` `NET_IP` | Live telemetry queries | value or `N/A` |
 
-The overlay sources live in [`firmware/overlay/`](firmware/overlay/); `build.sh` clones the upstream Freematics repo, copies the overlay into `firmware_v5/telelogger/`, patches `telelogger.ino` to call `processSerial(cfg)`, and builds with PlatformIO. See [`docs/user-guide.md`](docs/user-guide.md) for the end-user walkthrough.
+The overlay sources live in [`firmware/overlay/`](firmware/overlay/); `build.sh` clones the upstream Freematics repo, copies the overlay into `firmware_v5/telelogger/`, patches `telelogger.ino` to call `processSerial(cfg)`, and builds with PlatformIO. See [`firmware/README.md`](firmware/README.md) for the patch internals and [`docs/user-guide.md`](docs/user-guide.md) for the end-user walkthrough.
+
+## Serial communication & reliability
+
+The single most important thing to understand: **the patched firmware shares one UART between the telemetry logger and this config protocol.** While running, the firmware continuously prints its own async output (`[BUF] N samples …`, `[CELL] …`, GPS lines, boot/SD banners) and blocks for seconds on cellular/OBD/upload work. Naïvely reading "the next line" after sending a command therefore returns *telemetry chatter*, not the reply. Reliable config required fixes on **both** sides:
+
+**App side (`src-tauri/src/protocol/client.rs`):**
+
+- **Drain before send** — clears any buffered chatter so a stale line can't be mistaken for the reply.
+- **Read past chatter** — for commands that must be acknowledged (`set`, `save`), the client reads lines until it finds a definitive `OK`/`ERR`, skipping anything else, up to an 8 s per-attempt deadline, and **retries** (3×) to ride over a busy telemetry/cellular cycle. An explicit `ERR` is final; only silence is retried.
+- **Tolerant config dump** — `CFG_DUMP` is retried a few times (the CH340 auto-reset can reboot the ESP32 on port open) and only well-formed `key=value` lines are kept, so interleaved chatter is ignored.
+
+**Firmware side (`firmware/overlay/serial_handler.cpp` + `build.sh` `loop()` guards):**
+
+- **Backlog drain** — `processSerial()` consumes **all** queued command lines each `loop()`, not one — so a config command can't get stuck for minutes behind a backlog of live-poll queries the busy logger serviced one-per-iteration.
+- **Config window (`fcmInConfig`)** — a `CFG_*`/`CFG=` command opens an ~8 s window during which `loop()` skips the telemetry/upload work, so the line goes quiet and replies are prompt. Live queries do **not** open it, so telemetry keeps flowing during live polling.
+- **Keep-awake (`fcmAwake`)** — see below.
+
+## Live data & device sleep behavior
+
+The Freematics ONE+ is a vehicle tracker: when it sees no OBD link and no motion (e.g. on a bench), its `standby()` routine deliberately **sleeps until the device is physically moved** (`waitMotion(-1)`) or jump-start voltage appears. That would make the serial port go dead mid-configuration.
+
+To prevent that, **any** serial command refreshes a 60 s *keep-awake* window (`fcmAwake`); while it is active `loop()` skips `standby()`, so a connected configurator keeps the device alive and responsive. The desktop app sends a lightweight heartbeat (every ~20 s on config tabs; the live tab's 3 s poll covers itself) so the window never lapses during a session. When you disconnect, the window lapses after ~60 s and the device resumes normal tracker sleep.
+
+**Consequence — live data on a bench is limited.** While the device is held awake-and-quiet for configuration, its telemetry loop is paused, so `BATT`/`GPS`/`RSSI` typically read `N/A` (no OBD power, no indoor GPS fix); `UPTIME`, operator and IP still show. This is the inherent tension of a shared UART: a device can either *run* (full live telemetry, but it sleeps when parked) or be *held awake and quiet for config* — not robustly both at once. **This app prioritizes reliable configuration.** Empty live fields render as `0` or `—`, not an error.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `serial RX failed … BATT: no response` while idle | Normal — no OBD link means no battery reading. Harmless; logged at debug. |
+| Live data shows `0` / `—` / `N/A` on a bench | Expected — telemetry is paused while the device is kept awake for config, and there's no OBD/GPS on a desk. See [above](#live-data--device-sleep-behavior). |
+| Device stops responding after ~30 s | The device went into `standby()` (sleep). Fixed by the keep-awake firmware — **rebuild + reflash** so the device has it. If it has already slept, power-cycle it (a USB reconnect won't wake it because the app holds DTR/RTS low to avoid resetting it). |
+| `Apply` fails with "no response" / "unexpected response: …" | You are on firmware **older** than the reliability fixes. Rebuild the firmware (CI or `firmware/build.sh`), reflash via the app, and retry. |
+| `wifi_ssid` required even with Wi-Fi off | Fixed — SSID/password are only validated when *Enable Wi-Fi (station)* is checked. |
+| Flash screen flickers during progress | Fixed — the progress bar updates in place. |
+| Where are the debug logs? | The app uses `tauri-plugin-log`. On Windows: `%APPDATA%\com.maxynetwork.freematics-config-manager\logs\`; on Linux: `~/.local/share/com.maxynetwork.freematics-config-manager/logs/` (file name `freematics-config-manager`). Secrets (Wi-Fi/APN passwords, SIM PIN) are redacted. |
+
+> **Firmware changes require a rebuild + reflash.** App-side fixes ship in the app, but the backlog-drain, config-window, keep-awake, and live-data wiring all live in the firmware. After changing anything under `firmware/overlay/` or `firmware/build.sh`, rebuild the `.bin` (CI `build-firmware.yml` or `firmware/build.sh`), commit `firmware/dist/`, build the app, and flash the device once more.
 
 ## License
 

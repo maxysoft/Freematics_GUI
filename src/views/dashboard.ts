@@ -46,6 +46,10 @@ export function createDashboardView(opts: DashboardViewOptions): DashboardView {
   let live: LiveData | null = null;
   let timer: number | null = null;
   let livePolling = false;
+  // Separate from live polling: a slow heartbeat on config tabs so the device's
+  // keep-awake window (firmware fcmAwake) never lapses and it can't drop into
+  // standby() mid-configuration. On the live tab the 3s poll already covers it.
+  let keepAliveTimer: number | null = null;
   const formViews: Partial<Record<DashboardTab, FormView | { el: HTMLElement; refresh(): void }>> = {};
 
   function render(): void {
@@ -182,14 +186,41 @@ export function createDashboardView(opts: DashboardViewOptions): DashboardView {
     }
   }
 
-  /** Pause live polling (e.g. while the flash wizard is open). */
-  function pausePolling(): void {
-    stopLivePolling();
+  function startKeepAlive(): void {
+    if (keepAliveTimer !== null) return;
+    keepAliveTimer = window.setInterval(() => void keepAlive(), 20000);
   }
 
-  /** Resume live polling if currently on the live tab. */
+  function stopKeepAlive(): void {
+    if (keepAliveTimer !== null) {
+      window.clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+  }
+
+  // Heartbeat to keep the device awake while parked on a config tab. The live
+  // tab's own poll already does this, so skip there; never run while paused
+  // (flash wizard) — the port must be free. The reply is ignored.
+  async function keepAlive(): Promise<void> {
+    if (active === "live") return;
+    if (opts.pollingPaused && opts.pollingPaused()) return;
+    try {
+      await getLiveData(opts.portPath);
+    } catch {
+      /* keep-alive is best-effort */
+    }
+  }
+
+  /** Pause all serial activity (e.g. while the flash wizard is open). */
+  function pausePolling(): void {
+    stopLivePolling();
+    stopKeepAlive();
+  }
+
+  /** Resume polling/heartbeat after a pause. */
   function resumePolling(): void {
     if (active === "live") startLivePolling();
+    startKeepAlive();
   }
 
   async function pollLive(): Promise<void> {
@@ -220,9 +251,11 @@ export function createDashboardView(opts: DashboardViewOptions): DashboardView {
 
   function unmount(): void {
     stopLivePolling();
+    stopKeepAlive();
   }
 
   render();
+  startKeepAlive();
   return { el, unmount, refreshConfig, pausePolling, resumePolling };
 }
 

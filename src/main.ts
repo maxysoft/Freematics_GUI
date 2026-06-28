@@ -71,6 +71,11 @@ function render(): void {
   }
   root.appendChild(main);
 
+  const footer = document.createElement("footer");
+  footer.className = "app-footer";
+  footer.innerHTML = `<span>🤖 Made using AI</span>`;
+  root.appendChild(footer);
+
   if (appState.isFlashWizardOpen && appState.currentPort) {
     dashboardView?.pausePolling();
     // Wizard opened while NOT connected = first-run setup (device has no
