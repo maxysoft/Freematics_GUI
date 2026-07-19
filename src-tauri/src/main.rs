@@ -57,6 +57,7 @@ fn main() {
             commands::get_config,
             commands::set_config,
             commands::get_live_data,
+            commands::reboot_device,
             commands::get_firmware_info,
             commands::flash_firmware_cmd,
             commands::export_config_cmd,

@@ -54,9 +54,9 @@ export function createNetworkView(
       { name: "enable_wifi", label: "Enable WiFi (station)", type: "checkbox", desc: "Intent flag for this app's validation only: the firmware joins WiFi whenever a WiFi SSID below is set (regardless of this box). Leave the SSID blank to stay on cellular." },
       { name: "wifi_ssid", label: "WiFi SSID", type: "text", help: "1-31 characters", desc: "Name of the WiFi network the device should join when WiFi station mode is enabled." },
       { name: "wifi_password", label: "WiFi Password", type: "password", help: "8-63 characters (WPA2)", desc: "Password for the WiFi network to join. WPA2, 8–63 characters. Leave blank for an open network." },
-      { name: "enable_ble", label: "Enable Bluetooth LE", type: "checkbox", readonly: true, desc: "Advertise over Bluetooth Low Energy so nearby phones/apps can connect to the device. Set in the firmware build (ENABLE_BLE) — not changeable at runtime." },
-      { name: "wifi_ap_ssid", label: "WiFi AP SSID", type: "text", readonly: true, help: "Soft-AP name", desc: "Name the device broadcasts as its own WiFi hotspot (soft-AP). Compile-time only." },
-      { name: "wifi_ap_password", label: "WiFi AP Password", type: "password", readonly: true, help: "8-63 characters", desc: "Password for the device's own WiFi hotspot. Compile-time only." },
+      { name: "enable_ble", label: "Enable Bluetooth LE", type: "checkbox", desc: "Advertise over Bluetooth Low Energy so nearby phones/apps (Freematics Controller) can connect. Applied on the next device restart." },
+      { name: "wifi_ap_ssid", label: "WiFi AP SSID", type: "text", help: "Soft-AP name", desc: "Name the device broadcasts as its own WiFi hotspot (used by the on-device HTTP server). Applied on restart." },
+      { name: "wifi_ap_password", label: "WiFi AP Password", type: "password", help: "8-63 characters", desc: "Password for the device's own WiFi hotspot. 8–63 characters; leave blank for an open hotspot. Applied on restart." },
     ],
   });
 }

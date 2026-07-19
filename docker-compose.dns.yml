@@ -1,0 +1,15 @@
+# Optional override: pin public DNS inside the firmware container. Useful when
+# the host's local resolver is flaky — PlatformIO downloads fail with a bare
+# "HTTPClientError" on DNS timeouts. Use explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dns.yml \
+#     run --rm firmware bash build.sh
+services:
+  dev:
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+  firmware:
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8

@@ -94,6 +94,14 @@ pub async fn get_live_data(port_path: String) -> Result<LiveData, String> {
     .await
 }
 
+/// Restart the device so freshly saved config takes effect (the firmware
+/// applies the stored config once at boot).
+#[tauri::command]
+pub async fn reboot_device(port_path: String) -> Result<(), String> {
+    log::info!("reboot_device: restarting {port_path}");
+    with_serial(port_path, |client| client.reboot().map_err(|e| e.to_string())).await
+}
+
 /// Metadata about the bundled patched firmware.
 #[derive(Debug, Clone, Serialize)]
 pub struct FirmwareInfo {

@@ -4,7 +4,7 @@
 // validates on Apply, and calls setConfig with the merged config.
 
 import "../components/form-field";
-import { setConfig, type DeviceConfig } from "../lib/tauri";
+import { setConfig, rebootDevice, type DeviceConfig } from "../lib/tauri";
 import type { FmField } from "../components/form-field";
 
 export interface FieldSpec {
@@ -83,6 +83,7 @@ export function createFormView(opts: FormViewOptions): FormView {
       <form class="form-grid" id="cfg-form">${fields}
         <div class="form-actions">
           <button class="btn primary" type="submit">Apply</button>
+          <button class="btn ghost" type="button" id="restart-btn" hidden>Restart device now</button>
           <span class="form-status" role="status" aria-live="polite"></span>
         </div>
       </form>
@@ -99,6 +100,28 @@ export function createFormView(opts: FormViewOptions): FormView {
       e.preventDefault();
       void apply();
     });
+
+    el.querySelector("#restart-btn")?.addEventListener("click", () => void restart());
+  }
+
+  // The firmware applies the stored config once at boot, so saved changes
+  // take effect on the next restart. Offered after a successful Apply.
+  async function restart(): Promise<void> {
+    const status = el.querySelector(".form-status") as HTMLElement;
+    const btn = el.querySelector("#restart-btn") as HTMLButtonElement | null;
+    if (btn) btn.disabled = true;
+    status.textContent = "Restarting device…";
+    try {
+      await rebootDevice(opts.portPath);
+      // Give the device time to boot before implying it's usable again.
+      await new Promise((r) => setTimeout(r, 4000));
+      status.textContent = "Device restarted — settings are now active.";
+      if (btn) btn.hidden = true;
+    } catch (err) {
+      status.textContent = `Restart failed: ${String(err)}`;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   async function apply(): Promise<void> {
@@ -127,7 +150,9 @@ export function createFormView(opts: FormViewOptions): FormView {
     status.textContent = "Applying…";
     try {
       await setConfig(opts.portPath, working);
-      status.textContent = "Saved.";
+      status.textContent = "Saved — takes effect after a device restart.";
+      const btn = el.querySelector("#restart-btn") as HTMLButtonElement | null;
+      if (btn) btn.hidden = false;
       opts.onApplied?.(working);
     } catch (err) {
       status.textContent = `Error: ${String(err)}`;

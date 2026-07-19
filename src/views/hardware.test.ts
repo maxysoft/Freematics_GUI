@@ -84,29 +84,33 @@ describe("hardware view number coercion", () => {
     expect(typeof applied.motion_threshold).toBe("number");
   });
 
-  it("renders compile-time fields as disabled with a lock note", async () => {
+  it("renders all fields editable except the PSRAM hardware flag", async () => {
     const view = createHardwareView("/dev/ttyUSB0", sampleConfig(), () => {});
     document.body.appendChild(view.el);
     await new Promise((r) => setTimeout(r, 0));
 
-    // gnss_mode (select) + enable_obd (checkbox) are firmware compile-time only.
+    // With the runtime-config firmware, protocol/storage/GNSS/toggles are all
+    // settable from the app (applied on restart) — only the PSRAM hardware
+    // fact stays read-only.
     const gnss = view.el.querySelector('fm-field[name="gnss_mode"] select') as
       | HTMLSelectElement
       | null;
     const obd = view.el.querySelector('fm-field[name="enable_obd"] input') as
       | HTMLInputElement
       | null;
-    expect(gnss?.disabled).toBe(true);
-    expect(obd?.disabled).toBe(true);
-    expect(view.el.querySelector('fm-field[name="gnss_mode"]')?.textContent).toContain(
-      "Firmware build-time setting"
-    );
-
-    // A runtime-tunable number field stays editable.
     const cool = view.el.querySelector('fm-field[name="cooling_down_temp"] input') as
       | HTMLInputElement
       | null;
+    const psram = view.el.querySelector('fm-field[name="board_has_psram"] input') as
+      | HTMLInputElement
+      | null;
+    expect(gnss?.disabled).toBe(false);
+    expect(obd?.disabled).toBe(false);
     expect(cool?.disabled).toBe(false);
+    expect(psram?.disabled).toBe(true);
+    expect(view.el.querySelector('fm-field[name="board_has_psram"]')?.textContent).toContain(
+      "Firmware build-time setting"
+    );
   });
 
   it("still applies with read-only fields present (no validation block)", async () => {

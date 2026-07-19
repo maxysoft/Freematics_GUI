@@ -127,6 +127,12 @@ int main() {
     CHECK(Serial.out == "N/A\r\nN/A\r\nOK\r\n", "drains backlog and reaches CFG= in one call");
     CHECK(cfg.apn == "internet.it", "CFG= behind backlog still applied");
 
+    // 15. REBOOT acks with OK (host build: no actual restart, ESP.restart()
+    // is ARDUINO-gated).
+    feed("REBOOT\r\n");
+    processSerial(cfg);
+    CHECK(Serial.out == "OK\r\n", "REBOOT returns OK");
+
     if (failures == 0) {
         printf("\nALL SERIAL_HANDLER TESTS PASSED\n");
         return 0;

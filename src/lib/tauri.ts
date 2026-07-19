@@ -150,6 +150,11 @@ export function getLiveData(portPath: string): Promise<LiveData> {
   return invoke<LiveData>("get_live_data", { portPath });
 }
 
+/** Restart the device so freshly saved config takes effect (applied at boot). */
+export function rebootDevice(portPath: string): Promise<void> {
+  return invoke<void>("reboot_device", { portPath });
+}
+
 export function getFirmwareInfo(): Promise<FirmwareInfo> {
   return invoke<FirmwareInfo>("get_firmware_info");
 }

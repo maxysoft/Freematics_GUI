@@ -1,0 +1,12 @@
+# Optional override: passes the Freematics ONE+ serial port into the firmware
+# container for flashing / on-device protocol testing. Use explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.device.yml \
+#     run --rm firmware <cmd>
+#
+# Kept out of docker-compose.yml so normal builds don't fail when no device
+# is plugged in.
+services:
+  firmware:
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
