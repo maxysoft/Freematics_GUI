@@ -94,6 +94,18 @@ static void handleCommandLine(Config& cfg, String line) {
         return;
     }
 
+    // REBOOT — restart the device so freshly saved config takes effect. The
+    // app uses this for "Apply & Restart" instead of asking for a power-cycle.
+    if (up == "REBOOT") {
+        Serial.print("OK\r\n");
+#ifdef ARDUINO
+        Serial.flush();
+        delay(100);
+        ESP.restart();
+#endif
+        return;
+    }
+
     // CFG=key=val -----------------------------------------------------------
     if (up.startsWith("CFG=")) {
         fcmTouchConfig();

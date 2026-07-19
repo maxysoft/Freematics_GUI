@@ -263,6 +263,24 @@ impl<P: SerialPortOps> SerialClient<P> {
         self.command_expect_ok(&format!("CFG={key}={val}"))
     }
 
+    /// Restart the device (`REBOOT`) so freshly saved config takes effect.
+    /// The firmware prints `OK` and resets ~100ms later; if the reset wins the
+    /// race and the ack is never read, treat silence as success — the restart
+    /// is exactly what was asked for.
+    pub fn reboot(&mut self) -> io::Result<()> {
+        self.port.set_timeout(READ_TIMEOUT)?;
+        let _ = self.port.clear_input();
+        log::debug!("serial TX: \"REBOOT\"");
+        self.port.write_all(b"REBOOT\r\n")?;
+        self.port.flush()?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        match self.read_until(deadline, |t| t.eq_ignore_ascii_case(RESPONSE_OK)) {
+            Ok(Some(_)) => Ok(()),
+            // No ack or the port died mid-reset — the device is rebooting.
+            Ok(None) | Err(_) => Ok(()),
+        }
+    }
+
     pub fn dump_config(&mut self) -> io::Result<DeviceConfig> {
         self.port.set_timeout(READ_TIMEOUT)?;
         // Clear any async telemetry queued before the dump so the reply isn't

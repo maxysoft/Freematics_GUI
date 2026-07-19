@@ -10,7 +10,8 @@ Built with [Tauri 2](https://tauri.app/) (Rust backend + vanilla TypeScript fron
 ## Features
 
 - **USB autodetect** — automatically detects the Freematics ONE+ (CH341, VID `1a86` / PID `7523`) on Windows (`COM*`) and Linux (`/dev/ttyUSB*`).
-- **Full config management** — read and write the complete device parameter set over an AT-style serial protocol: cellular APN, Wi-Fi, server endpoint, GNSS mode, storage, OBD/MEMS toggles, SIM PIN, motion threshold, intervals, and more. Every parameter has an inline **“i” description** explaining what it does.
+- **Full config management** — read and write the complete device parameter set over an AT-style serial protocol: cellular APN, Wi-Fi, server endpoint, GNSS mode, storage, OBD/MEMS/BLE/HTTP toggles, SIM PIN, motion threshold, intervals, and more. Every parameter has an inline **“i” description** explaining what it does.
+- **Everything applies at runtime** — the patched firmware compiles all features in and selects them from the stored config at boot; changing any option is Apply → *Restart device* (one click), never a reflash. See [runtime configuration](#every-option-is-runtime-configurable--no-reflash-needed).
 - **First-run “Set up device”** — a brand-new device with no readable config can be configured using *only* this app: it flashes the patched firmware, then opens the configurator. No esptool, Python, or any other tool required.
 - **Native ESP32 flashing** — firmware is written with the [`espflash`](https://crates.io/crates/espflash) library compiled into the app (no `esptool.py`/Python). The patched `telelogger.bin` is bundled inside the app, so flashing works fully offline; a user-supplied `.bin` can also be chosen in the flash wizard.
 - **Backup & restore** — export the live config to a versioned JSON file (with the firmware SHA256 stamped in) and re-import it onto the same or another device. You choose the backup location via a native file dialog.
@@ -145,22 +146,18 @@ The stock Freematics `telelogger` firmware exposes config only over BLE. This pr
 | `CFG_SAVE`   | Persist current config to NVS            | `OK` |
 | `CFG_LOAD`   | Reload config from NVS                   | `OK` |
 | `APN?` / `SSID?` / `WPWD?` | Legacy single-key query    | current value |
+| `REBOOT`     | Restart the device (applies saved config) | `OK`, then resets |
 | `BATT` `RSSI` `VIN` `LAT` `LNG` `ALT` `SAT` `SPD` `CRS` `UPTIME` `NET_OP` `NET_IP` | Live telemetry queries | value or `N/A` |
 
 The overlay sources live in [`firmware/overlay/`](firmware/overlay/); `build.sh` clones the upstream Freematics repo, copies the overlay into `firmware_v5/telelogger/`, patches `telelogger.ino` to call `processSerial(cfg)`, and builds with PlatformIO. See [`firmware/README.md`](firmware/README.md) for the patch internals and [`docs/user-guide.md`](docs/user-guide.md) for the end-user walkthrough.
 
-### What the stored config actually changes
+### Every option is runtime-configurable — no reflash needed
 
-The stock telelogger drives its behavior from compile-time `#define`s and a legacy NVS namespace; the config store this patch adds was originally **inert** (saved, but never read back at runtime). `build.sh` now also wires the store into the firmware at boot (`cfg.load()` + an appended `fcmApplyConfig()`), so a subset of settings take effect on the next boot after you save:
+The stock telelogger fixes its behavior at compile time (`#define`s in `config.h`): protocol, storage, GNSS mode, and every feature toggle required editing the source and reflashing. The patched firmware removes that limitation: **all features are compiled in** (OBD, MEMS, BLE, HTTP server, WiFi, SD + SPIFFS, UDP + HTTPS) and the stored config **selects and tunes them at boot**. Changing any setting in the app is: Apply → **Restart device** (a button in the app — the firmware has a serial `REBOOT` command) → new behavior. Reflashing is only ever needed for firmware upgrades.
 
-| Takes effect (runtime) | Compile-time only (shown **read-only** in the app) |
-| --- | --- |
-| Cellular APN, APN user/pass, SIM PIN | Server host / port / protocol / path |
-| WiFi SSID + password (an SSID makes the device join WiFi) | GNSS mode, Storage, OBD/MEMS/HTTPD/BLE enables |
-| Sync & ping-back intervals | GNSS always-on, PSRAM flag, WiFi soft-AP |
-| Motion threshold, jump-start voltage, cool-down temp, GNSS reset timeout, max OBD errors | |
+Runtime-applied settings (everything the app shows): cellular APN + auth + SIM PIN, WiFi SSID/password, server host/port/protocol/path, GNSS mode + always-on + reset timeout, storage backend (SD/SPIFFS/none), OBD/MEMS/BLE/HTTP-server enables, WiFi soft-AP name/password, sync & ping-back intervals, motion threshold, jump-start voltage, cool-down temp, max OBD errors. The only read-only field is the PSRAM flag (a hardware fact).
 
-Runtime-applied settings apply **on the next reboot** (the values are read during boot/cellular init). The compile-time-only fields are disabled in the UI with a lock note, since changing them requires editing `config.h` and rebuilding the firmware. Live queries also no longer call the modem's blocking `getIP()` — `NET_IP` reports the IP cached at connection time so a down modem can't stall the serial link.
+Under the hood, this required making the upstream firmware's compile-time choices runtime-selectable: the UDP/HTTPS client and SD/SPIFFS logger are instantiated through base-class pointers chosen at boot, feature `#if` blocks gained runtime guards (with careful handling of the standby/wake logic and BLE/HTTPD loop pacing), and `SERVER_*` macros became variables fed from the config store. The patched firmware also services the config serial link **while sleeping**, so a configurator connecting to a parked device wakes it instead of requiring a power-cycle. Live queries never call blocking modem commands — `NET_IP` reports the IP cached at connection time.
 
 ## Serial communication & reliability
 
@@ -192,9 +189,9 @@ To prevent that, **any** serial command refreshes a 60 s *keep-awake* window (`f
 | --- | --- |
 | `serial RX failed … BATT: no response` while idle | Normal — no OBD link means no battery reading. Harmless; logged at debug. |
 | Live data shows `0` / `—` / `N/A` on a bench | Expected — telemetry is paused while the device is kept awake for config, and there's no OBD/GPS on a desk. See [above](#live-data--device-sleep-behavior). |
-| Device stops responding after ~30 s | The device went into `standby()` (sleep). Fixed by the keep-awake firmware — **rebuild + reflash** so the device has it. If it has already slept, power-cycle it (a USB reconnect won't wake it because the app holds DTR/RTS low to avoid resetting it). |
+| Device stops responding after ~30 s | The device went into `standby()` (sleep). The current firmware keeps a connected configurator awake, and even a **sleeping** device now services the config serial link (a serial command wakes it) — flash the bundled firmware if yours predates this. |
 | `Apply` fails with "no response" / "unexpected response: …" | You are on firmware **older** than the reliability fixes. Rebuild the firmware (CI or `firmware/build.sh`), reflash via the app, and retry. |
-| `Apply` succeeds but the setting didn't change | Runtime-applied settings (APN, WiFi, SIM PIN, intervals, thresholds) take effect on the **next reboot** — power-cycle the device. Settings shown **read-only** (🔒) are compile-time only and can't be changed here. Requires firmware with the config-wiring patch (rebuild + reflash). |
+| `Apply` succeeds but the setting didn't change | Settings take effect on the **next restart** — use the **Restart device now** button that appears after Apply (or power-cycle). Requires the runtime-config firmware (flash the bundled `.bin` once via the app). |
 | `Apply` fails with `invalid type: string … expected i32` | Fixed — number fields are now coerced before sending. Update the app. |
 | `wifi_ssid` required even with Wi-Fi off | Fixed — SSID/password are only validated when *Enable Wi-Fi (station)* is checked. |
 | Flash screen flickers during progress | Fixed — the progress bar updates in place. |
