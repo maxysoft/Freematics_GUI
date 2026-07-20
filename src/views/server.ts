@@ -22,14 +22,16 @@ const validators: Partial<Record<keyof DeviceConfig, Validator>> = {
     if (!Number.isInteger(n) || n < 0 || n > 65535) return "Port 0-65535";
     return null;
   },
+  // Both stored as int16_t on the device — bound them so a large value can't
+  // wrap negative (the firmware also rejects out-of-range with ERR now).
   server_sync_interval: (v) => {
     const n = Number(v);
-    if (!Number.isInteger(n) || n < 0) return "Must be non-negative integer";
+    if (!Number.isInteger(n) || n < 0 || n > 32767) return "0-32767 seconds";
     return null;
   },
   ping_back_interval: (v) => {
     const n = Number(v);
-    if (!Number.isInteger(n) || n < 0) return "Must be non-negative integer";
+    if (!Number.isInteger(n) || n < 0 || n > 32767) return "0-32767 seconds";
     return null;
   },
 };

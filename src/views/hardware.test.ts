@@ -113,6 +113,35 @@ describe("hardware view number coercion", () => {
     );
   });
 
+  it("blocks Apply when a number field is cleared (string reaches serde otherwise)", async () => {
+    const view = createHardwareView("/dev/ttyUSB0", sampleConfig(), () => {});
+    document.body.appendChild(view.el);
+
+    // A cleared <input type=number> emits "" — Number("") === 0 would pass
+    // naive validators, then serde would reject the string for i32.
+    emitFieldChange(view.el, "max_obd_errors", "");
+
+    const form = view.el.querySelector("#cfg-form") as HTMLFormElement;
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockedSetConfig).not.toHaveBeenCalled();
+    const field = view.el.querySelector('fm-field[name="max_obd_errors"]');
+    expect(field?.getAttribute("error")).toContain("number");
+  });
+
+  it("rejects fractional cool-down temp (device stores whole °C)", async () => {
+    const view = createHardwareView("/dev/ttyUSB0", sampleConfig(), () => {});
+    document.body.appendChild(view.el);
+    emitFieldChange(view.el, "cooling_down_temp", "80.5");
+
+    const form = view.el.querySelector("#cfg-form") as HTMLFormElement;
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockedSetConfig).not.toHaveBeenCalled();
+  });
+
   it("still applies with read-only fields present (no validation block)", async () => {
     const view = createHardwareView("/dev/ttyUSB0", sampleConfig(), () => {});
     document.body.appendChild(view.el);

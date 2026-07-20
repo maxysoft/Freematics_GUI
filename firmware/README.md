@@ -81,7 +81,9 @@ Defaults match `DeviceConfig::default()` in `src-tauri/src/protocol/types.rs`.
   for its soft-AP), `gnss` (none/standalone/cellular), `gnss_always`,
   `storage` (none/spiffs/sd).
 - **Tunables (0 = keep firmware default):** `motion_thr`, `jumpstart_v` (mV→V),
-  `cooling_t`, `gnss_reset_t`, `max_obd_err`, `srv_sync_int`, `pingback_int`.
+  `cooling_t`, `gnss_reset_t`, `max_obd_err`, `srv_sync_int`.
+- **`pingback_int`:** 0 = ping-backs **disabled** (matches the app's docs), any
+  other value = seconds between standby pings.
 - **Hardware fact (read-only):** `psram`.
 
 Strings override only when non-empty and numerics only when > 0, so an unset or

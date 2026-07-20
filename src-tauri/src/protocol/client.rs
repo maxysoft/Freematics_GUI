@@ -264,20 +264,33 @@ impl<P: SerialPortOps> SerialClient<P> {
     }
 
     /// Restart the device (`REBOOT`) so freshly saved config takes effect.
-    /// The firmware prints `OK` and resets ~100ms later; if the reset wins the
-    /// race and the ack is never read, treat silence as success — the restart
-    /// is exactly what was asked for.
+    /// The firmware acks with `OK` (flushed BEFORE the ~100ms-later reset), so
+    /// the ack is reliably readable — anything else is a real failure that
+    /// must NOT be reported as a successful restart: `ERROR` means firmware
+    /// without the REBOOT command, and silence means the device never took
+    /// the command (busy/wedged — if it executes the queued REBOOT later it
+    /// would reset at an arbitrary moment, so the caller must know).
     pub fn reboot(&mut self) -> io::Result<()> {
         self.port.set_timeout(READ_TIMEOUT)?;
         let _ = self.port.clear_input();
         log::debug!("serial TX: \"REBOOT\"");
         self.port.write_all(b"REBOOT\r\n")?;
         self.port.flush()?;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        match self.read_until(deadline, |t| t.eq_ignore_ascii_case(RESPONSE_OK)) {
-            Ok(Some(_)) => Ok(()),
-            // No ack or the port died mid-reset — the device is rebooting.
-            Ok(None) | Err(_) => Ok(()),
+        let deadline = Instant::now() + CMD_DEADLINE;
+        let matched = self.read_until(deadline, |t| {
+            t.eq_ignore_ascii_case(RESPONSE_OK)
+                || t.eq_ignore_ascii_case("ERR")
+                || t.eq_ignore_ascii_case("ERROR")
+        })?;
+        match matched {
+            Some(resp) if resp.eq_ignore_ascii_case(RESPONSE_OK) => Ok(()),
+            Some(_) => Err(io::Error::other(
+                "device rejected REBOOT — firmware without restart support? Reflash the bundled firmware, or power-cycle the device manually",
+            )),
+            None => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "no acknowledgement for REBOOT — device busy or unreachable; it was NOT restarted",
+            )),
         }
     }
 
@@ -566,6 +579,32 @@ mod tests {
         let resp = b"[BUF] 5 samples | 50 bytes | 1/8\rOK\r".to_vec();
         let mut client = SerialClient::new(MockPort::new(vec![resp]));
         assert!(client.save_config().is_ok());
+    }
+
+    #[test]
+    fn reboot_ok_succeeds_and_skips_chatter() {
+        let resp = b"[BUF] 1 samples | 10 bytes | 0/8\rOK\r".to_vec();
+        let mut client = SerialClient::new(MockPort::new(vec![resp]));
+        assert!(client.reboot().is_ok());
+    }
+
+    #[test]
+    fn reboot_error_reply_is_a_failure() {
+        // Stock/unpatched firmware answers ERROR to the unknown REBOOT command
+        // — that must NOT be reported as a successful restart.
+        let resp = b"ERROR\r".to_vec();
+        let mut client = SerialClient::new(MockPort::new(vec![resp]));
+        let err = client.reboot().unwrap_err();
+        assert!(err.to_string().contains("rejected"));
+    }
+
+    #[test]
+    fn reboot_silence_is_a_failure() {
+        // No ack means the device never took the command; claiming success
+        // would leave a queued REBOOT to fire at an arbitrary later moment.
+        let mut client = SerialClient::new(MockPort::new(vec![Vec::new()]));
+        let err = client.reboot().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]

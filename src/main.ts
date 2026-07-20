@@ -59,10 +59,13 @@ function render(): void {
       dashboardView = createDashboardView({
         portPath: port,
         config,
-        onConfigChanged: (c) => appState.setConfig(c),
+        // Quiet update: the form views already show the applied values; the
+        // emitting setConfig would rebuild the whole dashboard and destroy
+        // the post-Apply "Restart device now" affordance.
+        onConfigChanged: (c) => appState.setConfigQuiet(c),
         onDisconnect: () => appState.disconnect(),
         onOpenFlashWizard: () => appState.openFlashWizard(),
-        pollingPaused: () => appState.isFlashWizardOpen,
+        pollingPaused: () => appState.isFlashWizardOpen || appState.deviceRestarting,
       });
       main.appendChild(dashboardView.el);
     } else {

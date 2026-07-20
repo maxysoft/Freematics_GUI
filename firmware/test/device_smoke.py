@@ -152,8 +152,19 @@ def main() -> int:
             fails += 1
 
     if args.live:
+        # A live reply is a bare value: number, N/A, an IP, or a short
+        # operator/VIN string WITHOUT spaces-heavy telemetry chatter. Accept
+        # only plausible value shapes so chatter lines (e.g. "Motion:8.13",
+        # "[BUF] ...", "OBD:NO") can't be mistaken for the answer.
+        import re
+        value_re = re.compile(r"^(N/A|-?\d[\d.]*|\d+\.\d+\.\d+\.\d+|[A-Za-z0-9 ._-]{1,32})$")
+        chatter_re = re.compile(r"^(\[|Motion:|OBD:|GNSS|CELL|WIFI|STANDBY|WAKEUP|LOGIN|NO )")
         for k in LIVE_KEYS:
-            r = command(s, k, lambda l: not l.startswith("["), deadline=4.0)
+            r = command(
+                s, k,
+                lambda l: bool(value_re.match(l)) and not chatter_re.match(l),
+                deadline=4.0,
+            )
             print(f"   {k} = {r}")
 
     if args.reboot:
@@ -166,7 +177,20 @@ def main() -> int:
 
     if args.expect:
         print("== verify after (re)load")
-        kv = cfg_dump(s)
+        # After --reboot the device may still be in setup()/cell init for up
+        # to ~30s (processSerial doesn't run yet) — retry like the initial
+        # dump instead of letting a TimeoutError kill the script.
+        kv = {}
+        for attempt in range(6):
+            try:
+                kv = cfg_dump(s)
+                break
+            except TimeoutError as e:
+                print(f"   attempt {attempt + 1}: {e}; retrying…")
+                time.sleep(5.0)
+        if not kv:
+            print("   FAIL: no CFG_DUMP after retries")
+            fails += 1
         for pair in args.expect:
             k, v = pair.split("=", 1)
             got = kv.get(k)
