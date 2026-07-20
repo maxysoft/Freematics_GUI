@@ -132,9 +132,13 @@ void Config::defaults() {
     ssid = "";
     wpwd = "";
     srv_host = "hub.freematics.com";
-    srv_port = 8081;
+    // 0 / empty = "use the firmware's protocol default" (8081 for UDP, 443 for
+    // HTTPS, compile-time SERVER_PATH). Hardcoding UDP-flavored values here
+    // (8081, "/push") made switching to HTTPS silently target the wrong
+    // port/path because non-zero stored values always win.
+    srv_port = 0;
     srv_proto = "udp";
-    srv_path = "/push";
+    srv_path = "";
     gnss = "standalone";
     storage = "none";
     obd = true;
@@ -273,16 +277,40 @@ static bool parseBool(const String& v) {
     return t == "1" || t == "true" || t == "yes" || t == "on";
 }
 
+// Fields are stored as int16_t; a blind (int16_t)toInt() cast silently wraps
+// values > 32767 negative (e.g. 40000 -> -25536). Reject out-of-range input
+// with ERR instead so the writer finds out immediately.
+static bool parseI16(const String& v, int16_t& out) {
+    long n = v.toInt();
+    if (n < -32768 || n > 32767) return false;
+    out = (int16_t)n;
+    return true;
+}
+
+static bool parseU16(const String& v, uint16_t& out) {
+    long n = v.toInt();
+    if (n < 0 || n > 65535) return false;
+    out = (uint16_t)n;
+    return true;
+}
+
+// Enum-like keys accept only the tokens the firmware actually understands;
+// anything else previously got an OK, persisted, and silently fell back at
+// boot — the config claimed one mode while the device ran another.
+static bool validEnum(const String& v, const char* a, const char* b, const char* c) {
+    return v == a || v == b || v == c;
+}
+
 bool Config::set(const String& key, const String& val) {
     if (key == "apn") apn = val;
     else if (key == "ssid") ssid = val;
     else if (key == "wpwd") wpwd = val;
     else if (key == "srv_host") srv_host = val;
-    else if (key == "srv_port") srv_port = (uint16_t)val.toInt();
-    else if (key == "srv_proto") srv_proto = val;
+    else if (key == "srv_port") { if (!parseU16(val, srv_port)) return false; }
+    else if (key == "srv_proto") { if (!validEnum(val, "udp", "https_get", "https_post")) return false; srv_proto = val; }
     else if (key == "srv_path") srv_path = val;
-    else if (key == "gnss") gnss = val;
-    else if (key == "storage") storage = val;
+    else if (key == "gnss") { if (!validEnum(val, "none", "standalone", "cellular")) return false; gnss = val; }
+    else if (key == "storage") { if (!validEnum(val, "none", "spiffs", "sd")) return false; storage = val; }
     else if (key == "obd") obd = parseBool(val);
     else if (key == "mems") mems = parseBool(val);
     else if (key == "wifi") wifi = parseBool(val);
@@ -294,13 +322,13 @@ bool Config::set(const String& key, const String& val) {
     else if (key == "ap_ssid") ap_ssid = val;
     else if (key == "ap_pwd") ap_pwd = val;
     else if (key == "motion_thr") motion_thr = val.toFloat();
-    else if (key == "jumpstart_v") jumpstart_v = (int16_t)val.toInt();
-    else if (key == "cooling_t") cooling_t = (int16_t)val.toInt();
+    else if (key == "jumpstart_v") { if (!parseI16(val, jumpstart_v)) return false; }
+    else if (key == "cooling_t") { if (!parseI16(val, cooling_t)) return false; }
     else if (key == "gnss_always") gnss_always = parseBool(val);
-    else if (key == "gnss_reset_t") gnss_reset_t = (int16_t)val.toInt();
-    else if (key == "max_obd_err") max_obd_err = (int16_t)val.toInt();
-    else if (key == "srv_sync_int") srv_sync_int = (int16_t)val.toInt();
-    else if (key == "pingback_int") pingback_int = (int16_t)val.toInt();
+    else if (key == "gnss_reset_t") { if (!parseI16(val, gnss_reset_t)) return false; }
+    else if (key == "max_obd_err") { if (!parseI16(val, max_obd_err)) return false; }
+    else if (key == "srv_sync_int") { if (!parseI16(val, srv_sync_int)) return false; }
+    else if (key == "pingback_int") { if (!parseI16(val, pingback_int)) return false; }
     else if (key == "psram") psram = parseBool(val);
     else return false;
     return true;

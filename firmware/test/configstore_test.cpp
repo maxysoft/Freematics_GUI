@@ -39,9 +39,11 @@ int main() {
     Config c;
     c.load();
     CHECK(c.srv_host == "hub.freematics.com", "default srv_host");
-    CHECK(c.srv_port == 8081, "default srv_port");
+    // 0 / empty = firmware protocol default (8081 UDP / 443 HTTPS, compiled
+    // SERVER_PATH) — see configstore.cpp defaults().
+    CHECK(c.srv_port == 0, "default srv_port");
     CHECK(c.srv_proto == "udp", "default srv_proto");
-    CHECK(c.srv_path == "/push", "default srv_path");
+    CHECK(c.srv_path == "", "default srv_path");
     CHECK(c.gnss == "standalone", "default gnss");
     CHECK(c.storage == "none", "default storage");
     CHECK(c.obd == true, "default obd");
@@ -117,6 +119,20 @@ int main() {
     CHECK(!c2.set("nonexistent_key", "x"), "set unknown returns false");
     CHECK(c2.set("obd", "1"), "set obd");
     CHECK(c2.get("obd") == "1", "get obd after set");
+
+    // 6. Validation: out-of-range numerics and unknown enum tokens are
+    // rejected (previously they got an OK and silently wrapped/fell back).
+    CHECK(!c2.set("srv_sync_int", "40000"), "int16 overflow rejected");
+    CHECK(c2.get("srv_sync_int") != "-25536", "no wrapped value stored");
+    CHECK(!c2.set("srv_port", "70000"), "srv_port > 65535 rejected");
+    CHECK(!c2.set("srv_port", "-1"), "srv_port negative rejected");
+    CHECK(c2.set("srv_port", "443"), "valid srv_port accepted");
+    CHECK(!c2.set("gnss", "bogus"), "unknown gnss token rejected");
+    CHECK(c2.set("gnss", "cellular"), "valid gnss accepted");
+    CHECK(!c2.set("storage", "usb"), "unknown storage token rejected");
+    CHECK(!c2.set("srv_proto", "ftp"), "unknown srv_proto token rejected");
+    CHECK(c2.set("srv_proto", "https_post"), "valid srv_proto accepted");
+    CHECK(c2.set("pingback_int", "0"), "pingback 0 (disable) accepted");
 
     if (failures == 0) {
         printf("\nALL CONFIGSTORE TESTS PASSED\n");

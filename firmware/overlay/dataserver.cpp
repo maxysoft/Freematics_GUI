@@ -40,7 +40,9 @@
 
 #define WIFI_TIMEOUT 5000
 
-extern uint32_t fileid;
+// FCM patch: type must match the definition in telelogger.ino (`int fileid`);
+// the upstream `extern uint32_t` was an ODR violation that linked silently.
+extern int fileid;
 
 // FCM patch: storage backend + soft-AP credentials come from the stored
 // config at runtime (defined/seeded in telelogger.ino). fcmHttpdStarted stops
@@ -345,10 +347,13 @@ bool serverSetup(IPAddress& ip)
     WiFi.mode (WIFI_AP);
 #endif
 
-    // FCM patch: soft-AP name/password from the stored config; fall back to
-    // the compile-time defaults when unset. An empty password = open AP.
+    // FCM patch: soft-AP name from the stored config (compile default when
+    // unset). The password is used AS-IS: a blank password means an OPEN AP,
+    // exactly what the app promises — falling back to the compile-time
+    // WIFI_AP_PASSWORD here would silently protect the AP with the publicly
+    // documented upstream default ("PASSWORD").
     WiFi.softAP(fcmApSSID[0] ? fcmApSSID : WIFI_AP_SSID,
-                fcmApPwd[0] ? fcmApPwd : WIFI_AP_PASSWORD);
+                fcmApPwd[0] ? fcmApPwd : (const char*)0);
     ip = WiFi.softAPIP();
 
     mwInitParam(&httpParam, 80, "/spiffs");

@@ -17,6 +17,10 @@ const STORAGE_OPTIONS: Array<[string, string]> = [
   ["sd", "SD Card"],
 ];
 
+// Upper bound for values the firmware stores as int16_t — anything larger
+// would be rejected by the device (and used to silently wrap negative).
+const I16_MAX = 32767;
+
 const validators: Partial<Record<keyof DeviceConfig, Validator>> = {
   motion_threshold: (v) => {
     const n = Number(v);
@@ -29,18 +33,20 @@ const validators: Partial<Record<keyof DeviceConfig, Validator>> = {
     return null;
   },
   cooling_down_temp: (v) => {
+    // Stored as a whole °C (i32 app-side, int16 on the device) — a fractional
+    // value would fail serde deserialization with a cryptic error.
     const n = Number(v);
-    if (Number.isNaN(n)) return "Must be a number";
+    if (!Number.isInteger(n) || n < 0 || n > I16_MAX) return "Whole °C, 0-32767";
     return null;
   },
   gnss_reset_timeout: (v) => {
     const n = Number(v);
-    if (!Number.isInteger(n) || n < 0) return "Non-negative integer";
+    if (!Number.isInteger(n) || n < 0 || n > I16_MAX) return `0-${I16_MAX} seconds`;
     return null;
   },
   max_obd_errors: (v) => {
     const n = Number(v);
-    if (!Number.isInteger(n) || n < 0) return "Non-negative integer";
+    if (!Number.isInteger(n) || n < 0 || n > I16_MAX) return `0-${I16_MAX}`;
     return null;
   },
 };
@@ -65,7 +71,7 @@ export function createHardwareView(
       { name: "board_has_psram", label: "Board has PSRAM", type: "checkbox", readonly: true, help: "Read-only flag from device", desc: "Indicates the ESP32 module has extra PSRAM. A hardware fact — informational only." },
       { name: "motion_threshold", label: "Motion Threshold", type: "number", min: 0, step: 0.01, desc: "G-force change that counts as motion, used to decide sleep/wake. Higher values are less sensitive. Applied on restart." },
       { name: "jumpstart_voltage", label: "Jump-start Voltage (mV)", type: "number", min: 0, max: 30000, step: 100, help: "Millivolts — e.g. 14500 = 14.5 V", desc: "Battery voltage in millivolts above which the device assumes the engine just started / is charging (e.g. 14500 = 14.5 V). Applied on restart." },
-      { name: "cooling_down_temp", label: "Cool-down Temp (°C)", type: "number", step: 0.5, desc: "Device temperature in °C at which it pauses to cool down and avoid overheating. Applied on restart." },
+      { name: "cooling_down_temp", label: "Cool-down Temp (°C)", type: "number", min: 0, step: 1, desc: "Device temperature in whole °C at which it pauses to cool down and avoid overheating. Applied on restart." },
       { name: "gnss_always_on", label: "GNSS Always On", type: "checkbox", desc: "Keep the GPS powered during standby for faster position fixes, at higher power cost. Applied on restart." },
       { name: "gnss_reset_timeout", label: "GNSS Reset Timeout (s)", type: "number", min: 0, step: 1, desc: "Seconds without a GPS fix before the GPS module is reset to recover. 0 keeps the firmware default. Applied on restart." },
       { name: "max_obd_errors", label: "Max OBD Errors", type: "number", min: 0, step: 1, desc: "Consecutive OBD read failures tolerated before the device re-initialises the OBD-II link. Applied on restart." },

@@ -6,14 +6,19 @@
 #include "mock_serial.h"
 #endif
 
-// Live-telemetry hook. The REAL implementation is appended to telelogger.ino at
-// build time (see firmware/build.sh) where the live globals (batteryVoltage,
-// rssi, netop, gd, vin, teleClient, millis()) are in scope. This weak default
-// is linked when that override is absent (host tests, un-patched builds) so the
-// firmware always builds and simply reports "N/A" for every field.
+// Live-telemetry hook. The REAL implementation lives in the vendored
+// telelogger.ino where the live globals (batteryVoltage, rssi, netop, gd, vin,
+// teleClient, millis()) are in scope. This weak default is linked when that
+// override is absent (host tests, un-patched builds) so the firmware always
+// builds and simply reports "N/A" for every field.
 __attribute__((weak)) String fcmLiveQuery(const String&) {
     return "N/A";
 }
+
+// Pre-restart hook: the sketch's strong override closes the active log file so
+// an app-triggered REBOOT can't lose/corrupt the open SD/SPIFFS log (the BLE
+// RESET path has always done this). Weak default for host tests.
+__attribute__((weak)) void fcmPrepareRestart() {}
 
 // Config-window machinery (see serial_handler.h / loop() guard in build.sh).
 // A config command opens an N-ms window during which loop() skips telemetry so
@@ -100,6 +105,7 @@ static void handleCommandLine(Config& cfg, String line) {
         Serial.print("OK\r\n");
 #ifdef ARDUINO
         Serial.flush();
+        fcmPrepareRestart();
         delay(100);
         ESP.restart();
 #endif

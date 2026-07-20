@@ -4,7 +4,8 @@
 // validates on Apply, and calls setConfig with the merged config.
 
 import "../components/form-field";
-import { setConfig, rebootDevice, type DeviceConfig } from "../lib/tauri";
+import { setConfig, rebootDevice, getConfig, type DeviceConfig } from "../lib/tauri";
+import { appState } from "../lib/state";
 import type { FmField } from "../components/form-field";
 
 export interface FieldSpec {
@@ -106,20 +107,42 @@ export function createFormView(opts: FormViewOptions): FormView {
 
   // The firmware applies the stored config once at boot, so saved changes
   // take effect on the next restart. Offered after a successful Apply.
+  // While restarting, dashboard polling is paused (appState.deviceRestarting):
+  // each serial open toggles DTR/RTS, which can reset the ESP32 again
+  // mid-boot. Readiness is PROBED (boot + cell init can take ~30s), never
+  // assumed from a fixed sleep.
   async function restart(): Promise<void> {
     const status = el.querySelector(".form-status") as HTMLElement;
     const btn = el.querySelector("#restart-btn") as HTMLButtonElement | null;
     if (btn) btn.disabled = true;
+    appState.deviceRestarting = true;
     status.textContent = "Restarting device…";
     try {
       await rebootDevice(opts.portPath);
-      // Give the device time to boot before implying it's usable again.
-      await new Promise((r) => setTimeout(r, 4000));
-      status.textContent = "Device restarted — settings are now active.";
-      if (btn) btn.hidden = true;
+      status.textContent = "Device restarting — waiting for it to come back…";
+      const deadline = Date.now() + 60_000;
+      let ready = false;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 4000));
+        try {
+          await getConfig(opts.portPath);
+          ready = true;
+          break;
+        } catch {
+          /* still booting — keep probing */
+        }
+      }
+      if (ready) {
+        status.textContent = "Device restarted — settings are now active.";
+        if (btn) btn.hidden = true;
+      } else {
+        status.textContent =
+          "Device restarted but hasn't answered yet — give it a moment, then reconnect if needed.";
+      }
     } catch (err) {
       status.textContent = `Restart failed: ${String(err)}`;
     } finally {
+      appState.deviceRestarting = false;
       if (btn) btn.disabled = false;
     }
   }
@@ -135,6 +158,16 @@ export function createFormView(opts: FormViewOptions): FormView {
       const validator = opts.validators?.[spec.name];
       const field = fieldEl(spec.name);
       field?.setAttribute("error", "");
+      // Built-in guard for every number field: coerceValue keeps unparseable
+      // input (e.g. a cleared field) as a string, and per-field validators
+      // like Number("") === 0 would wave it through — only for serde to
+      // reject the string with a cryptic "invalid type" error. Catch it here.
+      if (spec.type === "number" && typeof working[spec.name] === "string") {
+        const msg = "Must be a number";
+        field?.setAttribute("error", msg);
+        if (!firstError) firstError = { name: spec.name, msg };
+        continue;
+      }
       if (validator) {
         const msg = validator(working[spec.name], working);
         if (msg) {

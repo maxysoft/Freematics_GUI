@@ -143,9 +143,13 @@ impl Default for DeviceConfig {
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             server_host: "hub.freematics.com".to_string(),
-            server_port: 8081,
+            // 0 / empty = "firmware protocol default" (8081 UDP / 443 HTTPS,
+            // compile-time server path). Mirrors the firmware config store —
+            // hardcoding UDP-flavored values here made switching the protocol
+            // silently keep the wrong port/path.
+            server_port: 0,
             server_protocol: ServerProtocol::Udp,
-            server_path: "/push".to_string(),
+            server_path: String::new(),
             gnss_mode: GnssMode::Standalone,
             storage: StorageMode::None,
             enable_obd: true,
@@ -399,9 +403,10 @@ mod tests {
     fn default_matches_research_defaults() {
         let cfg = DeviceConfig::default();
         assert_eq!(cfg.server_host, "hub.freematics.com");
-        assert_eq!(cfg.server_port, 8081);
+        // 0 / empty = firmware protocol default (see DeviceConfig::default)
+        assert_eq!(cfg.server_port, 0);
         assert_eq!(cfg.server_protocol, ServerProtocol::Udp);
-        assert_eq!(cfg.server_path, "/push");
+        assert_eq!(cfg.server_path, "");
         assert_eq!(cfg.gnss_mode, GnssMode::Standalone);
         assert_eq!(cfg.storage, StorageMode::None);
         assert!(cfg.enable_obd);

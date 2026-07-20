@@ -561,7 +561,9 @@ bool TeleClientHTTP::transmit(const char* packetBuffer, unsigned int packetSize)
   int len;
   // FCM patch: GET vs POST decided at runtime (fcmSrvMethodGet) instead of the
   // compile-time SERVER_PROTOCOL. Also fixes the upstream GET branch, which
-  // wrote into an undeclared `url` buffer and did not even compile.
+  // wrote into an undeclared `url` buffer and did not even compile — and which
+  // only knew the cellular transport: the sketch powers the cell modem OFF
+  // once WiFi connects, so GET must use WiFi when it is up, like POST does.
   if (fcmSrvMethodGet) {
     if (gd && gd->ts) {
       len = snprintf(path, sizeof(path), "%s/push?id=%s&timestamp=%s&lat=%f&lon=%f&altitude=%d&speed=%f&heading=%d",
@@ -570,7 +572,19 @@ bool TeleClientHTTP::transmit(const char* packetBuffer, unsigned int packetSize)
     } else {
       len = snprintf(path, sizeof(path), "%s/push?id=%s", fcmSrvPath, devid);
     }
-    success = cell.send(METHOD_GET, fcmSrvHost, fcmSrvPort, path);
+#if ENABLE_WIFI
+    if (wifi.connected()) {
+      Serial.print("[WIFI] ");
+      Serial.println(path);
+      success = wifi.send(METHOD_GET, path);
+    }
+    else
+#endif
+    {
+      Serial.print("[CELL] ");
+      Serial.println(path);
+      success = cell.send(METHOD_GET, fcmSrvHost, fcmSrvPort, path);
+    }
   } else {
   len = snprintf(path, sizeof(path), "%s/post/%s", fcmSrvPath, devid);
 #if ENABLE_WIFI

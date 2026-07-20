@@ -104,6 +104,25 @@ export class AppState {
     this.emit();
   }
 
+  /**
+   * Update the config snapshot WITHOUT notifying listeners. Used by the form
+   * Apply path: the emitting variant triggers main.ts's full view rebuild,
+   * which destroys the just-revealed "Restart device now" button and status
+   * one frame after Apply. The form views already hold the applied values, so
+   * no re-render is needed — only the stored snapshot must stay current.
+   */
+  setConfigQuiet(config: DeviceConfig): void {
+    this.config = config;
+  }
+
+  /**
+   * True while the app is restarting the device and waiting for it to boot.
+   * Dashboard polling/keep-alive must pause: each serial open toggles DTR/RTS,
+   * which can reset the ESP32 again mid-boot. Not emitted — polling reads it
+   * on each tick.
+   */
+  deviceRestarting = false;
+
   setLiveData(data: LiveData): void {
     this.liveData = data;
     this.emit();

@@ -37,13 +37,22 @@ echo "==> [1/4] Cloning Freematics repo (ref=${FREEMATICS_REF})"
 if [ ! -d "${REPO_DIR}/.git" ]; then
   git clone https://github.com/stanleyhuangyc/Freematics.git "${REPO_DIR}"
 fi
-git -C "${REPO_DIR}" config --local --add safe.directory "${REPO_DIR}" 2>/dev/null || true
-git config --global --add safe.directory "${REPO_DIR}" 2>/dev/null || true
-git -C "${REPO_DIR}" fetch --quiet origin 2>/dev/null || true
-git -C "${REPO_DIR}" checkout --quiet "${FREEMATICS_REF}" -- . 2>/dev/null || git -C "${REPO_DIR}" checkout --quiet "${FREEMATICS_REF}" || true
-# Restore any upstream file a previous run overwrote, so the overlay always
-# lands on a pristine tree.
-git -C "${REPO_DIR}" checkout --quiet -- firmware_v5/telelogger/ || true
+git config --global --add safe.directory "${REPO_DIR}"
+# The pin is a hard requirement: the vendored overlay files were derived from
+# exactly this tree. Fetch only when the commit is missing locally (keeps
+# cached/offline builds working), then FAIL LOUDLY if it still can't be
+# resolved — silently building against a different tree produces firmware
+# that mismatches the vendored sources.
+if ! git -C "${REPO_DIR}" rev-parse --quiet --verify "${FREEMATICS_REF}^{commit}" >/dev/null; then
+  git -C "${REPO_DIR}" fetch origin
+fi
+git -C "${REPO_DIR}" rev-parse --verify "${FREEMATICS_REF}^{commit}" >/dev/null
+# checkout --force puts the whole worktree at the pinned tree (restoring any
+# file a previous run overwrote AND removing tracked files that only exist in
+# newer upstream commits); clean sweeps untracked leftovers (stale overlay
+# copies) but keeps the .pio build cache.
+git -C "${REPO_DIR}" checkout --force --quiet "${FREEMATICS_REF}"
+git -C "${REPO_DIR}" clean -fdq -e .pio -- firmware_v5/telelogger/
 
 echo "==> [2/4] Copying overlay (vendored patched sources + additions)"
 for f in configstore.h configstore.cpp serial_handler.h serial_handler.cpp \

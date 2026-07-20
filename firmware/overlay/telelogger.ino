@@ -27,6 +27,9 @@
 #include "driver/adc.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#if ENABLE_BLE
+#include "esp_bt.h" // esp_bt_controller_mem_release when BLE runtime-disabled
+#endif
 #if ENABLE_OLED
 #include "FreematicsOLED.h"
 #endif
@@ -62,7 +65,20 @@ uint16_t fcmSrvPort = SERVER_PORT;
 char fcmSrvPath[64] = SERVER_PATH;
 char fcmApSSID[32] = WIFI_AP_SSID;
 char fcmApPwd[32] = WIFI_AP_PASSWORD;
+// Boot-time snapshots of the cellular credentials. The telemetry task must
+// NEVER read the cfg Strings directly: the loop task mutates them on CFG=
+// (Arduino String = heap realloc), and an unsynchronized cross-task read is a
+// use-after-free. Snapshots are plain char arrays written once in
+// fcmApplyConfig() before the telemetry task starts.
+char fcmSimPin[16] = SIM_CARD_PIN;
+char fcmApnUser[32] = "";
+char fcmApnPass[32] = "";
+// Guards the netop/ip String globals, which the telemetry task reassigns and
+// the loop task (serial live queries, BLE) reads concurrently.
+SemaphoreHandle_t fcmLiveMux = 0;
 void fcmApplyConfig(Config& c);
+static void fcmSetNetop(const String& v);
+static void fcmSetIp(const String& v);
 
 // states
 #define STATE_STORAGE_READY 0x1
@@ -787,9 +803,12 @@ void process()
 
   const int dataIntervals[] = DATA_INTERVAL_TABLE;
   // FCM patch: motion sources (OBD speed / MEMS) are runtime toggles now. With
-  // both disabled lastMotionTime never updates, so the adaptive control would
-  // immediately think the vehicle is parked and standby — use a fixed interval.
-  if (fcmObd || fcmMems) {
+  // neither USABLE, lastMotionTime never updates, so the adaptive control would
+  // park the device — and standby() would then have no wake source and fall
+  // into the restart branch, i.e. a perpetual reboot loop. MEMS counts as a
+  // motion source only if its probe actually succeeded; otherwise keep running
+  // at a fixed interval.
+  if (fcmObd || (fcmMems && state.check(STATE_MEMS_READY))) {
   // motion adaptive data interval control
   const uint16_t stationaryTime[] = STATIONARY_TIME_TABLE;
   unsigned int motionless = (millis() - lastMotionTime) / 1000;
@@ -840,7 +859,7 @@ bool initCell(bool quick = false)
   Serial.print("CELL:");
   Serial.println(teleClient->cellClient()->deviceName());
   // FCM patch: SIM PIN from the stored config (empty = no PIN).
-  if (!teleClient->cellClient()->checkSIM(cfg.sim_pin.length() ? cfg.sim_pin.c_str() : (const char*)0)) {
+  if (!teleClient->cellClient()->checkSIM(fcmSimPin[0] ? fcmSimPin : (const char*)0)) {
     Serial.println("NO SIM CARD");
     //return false;
   }
@@ -853,9 +872,9 @@ bool initCell(bool quick = false)
   }
   // FCM patch: APN auth from the stored config (empty = none).
   if (teleClient->cellClient()->setup(apn,
-        cfg.apn_user.length() ? cfg.apn_user.c_str() : (const char*)0,
-        cfg.apn_pass.length() ? cfg.apn_pass.c_str() : (const char*)0)) {
-    netop = teleClient->cellClient()->getOperatorName();
+        fcmApnUser[0] ? fcmApnUser : (const char*)0,
+        fcmApnPass[0] ? fcmApnPass : (const char*)0)) {
+    fcmSetNetop(teleClient->cellClient()->getOperatorName());
     if (netop.length()) {
       Serial.print("Operator:");
       Serial.println(netop);
@@ -870,7 +889,7 @@ bool initCell(bool quick = false)
       }
     }
 
-    ip = teleClient->cellClient()->getIP();
+    fcmSetIp(teleClient->cellClient()->getIP());
     if (ip.length()) {
       Serial.print("[CELL] IP:");
       Serial.println(ip);
@@ -920,8 +939,8 @@ void telemetry(void* inst)
     if (state.check(STATE_STANDBY)) {
       if (state.check(STATE_CELL_CONNECTED) || state.check(STATE_WIFI_CONNECTED)) {
         teleClient->shutdown();
-        netop = "";
-        ip = "";
+        fcmSetNetop("");
+        fcmSetIp("");
         rssi = 0;
       }
       state.clear(STATE_NET_READY | STATE_CELL_CONNECTED | STATE_WIFI_CONNECTED);
@@ -931,7 +950,8 @@ void telemetry(void* inst)
       uint32_t t = millis();
       do {
         delay(1000);
-      } while (state.check(STATE_STANDBY) && millis() - t < 1000L * fcmPingbackInt);
+      // FCM patch: fcmPingbackInt <= 0 = ping-backs disabled (keep sleeping).
+      } while (state.check(STATE_STANDBY) && (fcmPingbackInt <= 0 || millis() - t < 1000L * fcmPingbackInt));
       if (state.check(STATE_STANDBY)) {
         // start ping
 #if ENABLE_WIFI
@@ -971,7 +991,7 @@ void telemetry(void* inst)
 #if ENABLE_WIFI
       if (wifiSSID[0]) {
         if (!state.check(STATE_WIFI_CONNECTED) && teleClient->wifiClient()->connected()) {
-          ip = teleClient->wifiClient()->getIP();
+          fcmSetIp(teleClient->wifiClient()->getIP());
           if (ip.length()) {
             Serial.print("[WIFI] IP:");
             Serial.println(ip);
@@ -1154,6 +1174,18 @@ void standby()
     } while (obd.getVoltage() < fcmJumpstartV);
   } else {
     delay(5000);
+    // FCM patch: this branch is reachable via cooling-down/BLE-OFF standby;
+    // service the config link here too so a configurator can always connect.
+    processSerial(cfg);
+  }
+  // FCM patch: a SERIAL wake means a configurator wants to talk — it must NOT
+  // go through the motion-wake tail below (resetLink + RESET_AFTER_WAKEUP's
+  // ESP.restart()), which would reboot the device the host just connected to
+  // and turn periodic app polling into an endless reboot cycle. Return with
+  // standby states intact; loop()'s keep-awake guard services serial until
+  // the window lapses, then standby() runs again.
+  if (fcmAwake()) {
+    return;
   }
   Serial.println("WAKEUP");
   sys.resetLink();
@@ -1421,7 +1453,10 @@ void setup()
 
   // FCM patch: load the app-managed config store and apply it to the runtime
   // switches, then create the protocol client and storage logger it selected.
-  // Must happen before anything below consults the fcm* globals.
+  // Must happen before anything below consults the fcm* globals, and before
+  // the telemetry task starts (fcmApplyConfig snapshots the credential
+  // Strings the telemetry task must never read live).
+  fcmLiveMux = xSemaphoreCreateMutex();
   cfg.load();
   fcmApplyConfig(cfg);
   if (fcmProto == PROTOCOL_UDP) {
@@ -1441,6 +1476,11 @@ void setup()
 #endif
   // initialize USB serial
   Serial.begin(115200);
+  // FCM patch: readStringUntil() in processSerial blocks up to the Stream
+  // default timeout (1000ms!) when a partial line sits in the buffer — called
+  // from loop() and the standby wait loops, a stray byte would stall telemetry
+  // and motion detection for a second per call. Keep the wait short.
+  Serial.setTimeout(50);
 
   // init LED pin
 #ifdef PIN_LED
@@ -1539,9 +1579,14 @@ if (fcmMems && !state.check(STATE_MEMS_READY)) do {
 
 #if ENABLE_BLE
   // FCM patch: init BLE only when enabled at runtime (processBLE falls back
-  // to a plain delay when the queue was never created).
+  // to a plain delay when the queue was never created). With BLE disabled,
+  // hand the Bluetooth controller's static RAM reservation (~50KB on a 320KB
+  // chip) back to the heap — compiling BLE in must not cost disabled devices
+  // the memory.
   if (fcmBle) {
     ble_init("FreematicsPlus");
+  } else {
+    esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
   }
 #endif
 
@@ -1598,11 +1643,18 @@ void fcmApplyConfig(Config& c)
   if (c.ssid.length()) { strncpy(wifiSSID, c.ssid.c_str(), sizeof(wifiSSID) - 1); wifiSSID[sizeof(wifiSSID) - 1] = 0; }
   if (c.wpwd.length()) { strncpy(wifiPassword, c.wpwd.c_str(), sizeof(wifiPassword) - 1); wifiPassword[sizeof(wifiPassword) - 1] = 0; }
 #endif
+  // cellular credential snapshots for the telemetry task (see declarations)
+  if (c.sim_pin.length())  { strncpy(fcmSimPin, c.sim_pin.c_str(), sizeof(fcmSimPin) - 1); fcmSimPin[sizeof(fcmSimPin) - 1] = 0; }
+  if (c.apn_user.length()) { strncpy(fcmApnUser, c.apn_user.c_str(), sizeof(fcmApnUser) - 1); fcmApnUser[sizeof(fcmApnUser) - 1] = 0; }
+  if (c.apn_pass.length()) { strncpy(fcmApnPass, c.apn_pass.c_str(), sizeof(fcmApnPass) - 1); fcmApnPass[sizeof(fcmApnPass) - 1] = 0; }
   // tunables (0 = keep firmware default)
   if (c.motion_thr > 0)   fcmMotionThr   = c.motion_thr;
   if (c.max_obd_err > 0)  fcmMaxObdErr   = c.max_obd_err;
   if (c.gnss_reset_t > 0) fcmGnssResetT  = c.gnss_reset_t;
-  if (c.pingback_int > 0) fcmPingbackInt = c.pingback_int;
+  // pingback deliberately breaks the "0 = keep firmware default" rule: the
+  // app documents 0 as "disable ping-backs", so honor that (the standby loop
+  // treats fcmPingbackInt <= 0 as never-ping).
+  fcmPingbackInt = c.pingback_int > 0 ? c.pingback_int : 0;
   if (c.cooling_t > 0)    fcmCoolingT    = c.cooling_t;
   if (c.jumpstart_v > 0)  fcmJumpstartV  = c.jumpstart_v / 1000.0f; // mV -> V
   if (c.srv_sync_int > 0) syncInterval   = (int32_t)c.srv_sync_int * 1000;
@@ -1633,6 +1685,44 @@ void fcmApplyConfig(Config& c)
 }
 
 // ---------------------------------------------------------------------------
+// FCM: close the active log before an app-triggered REBOOT (strong override
+// of the weak hook in serial_handler.cpp) — same shutdown the BLE RESET path
+// performs, so a restart can't lose/corrupt the open SD/SPIFFS log file.
+// ---------------------------------------------------------------------------
+void fcmPrepareRestart()
+{
+  if (logger) logger->end();
+}
+
+// ---------------------------------------------------------------------------
+// FCM: mutex-guarded access to the netop/ip String globals. The telemetry
+// task reassigns them (connect/standby) while the loop task reads them for
+// serial live queries and BLE — an unguarded concurrent read of an Arduino
+// String being reassigned is a use-after-free.
+// ---------------------------------------------------------------------------
+static void fcmSetNetop(const String& v)
+{
+  if (fcmLiveMux) xSemaphoreTake(fcmLiveMux, portMAX_DELAY);
+  netop = v;
+  if (fcmLiveMux) xSemaphoreGive(fcmLiveMux);
+}
+
+static void fcmSetIp(const String& v)
+{
+  if (fcmLiveMux) xSemaphoreTake(fcmLiveMux, portMAX_DELAY);
+  ip = v;
+  if (fcmLiveMux) xSemaphoreGive(fcmLiveMux);
+}
+
+static String fcmCopyLive(const String& src)
+{
+  if (fcmLiveMux) xSemaphoreTake(fcmLiveMux, portMAX_DELAY);
+  String out = src;
+  if (fcmLiveMux) xSemaphoreGive(fcmLiveMux);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // FCM: live telemetry hook backing the serial BATT/RSSI/GPS/NET_* queries
 // (strong override of the weak default in serial_handler.cpp). NET_IP reports
 // the IP cached at connection time — never a blocking modem AT command.
@@ -1643,8 +1733,8 @@ String fcmLiveQuery(const String& key)
   if (key == "RSSI")   return rssi ? String((int)rssi) : String("N/A");
   if (key == "VIN")    return vin[0] ? String(vin) : String("N/A");
   if (key == "UPTIME") return String((unsigned long)millis());
-  if (key == "NET_OP") return netop.length() ? netop : String("N/A");
-  if (key == "NET_IP") return ip.length() ? ip : String("N/A");
+  if (key == "NET_OP") { String v = fcmCopyLive(netop); return v.length() ? v : String("N/A"); }
+  if (key == "NET_IP") { String v = fcmCopyLive(ip); return v.length() ? v : String("N/A"); }
   if (gd && gd->ts) {
     if (key == "LAT") return String(gd->lat, 6);
     if (key == "LNG") return String(gd->lng, 6);
