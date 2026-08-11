@@ -108,7 +108,16 @@ PID_POLLING_INFO obdData[]= {
   {PID_TIMING_ADVANCE, 2},
   {PID_COOLANT_TEMP, 3},
   {PID_INTAKE_TEMP, 3},
+  // FCM patch (from soshial/traccar_integration 36dba09): fuel level changes
+  // slowly — lowest-frequency tier. Traccar attribute io303.
+  {PID_FUEL_LEVEL, 3},
 };
+
+// FCM patch (from soshial/traccar_integration 36dba09): ignition state PID,
+// not defined by the upstream library.
+#ifndef PID_IGNITION
+#define PID_IGNITION 0x92
+#endif
 
 CBufferManager bufman;
 Task subtask;
@@ -199,6 +208,13 @@ MEMS_I2C* mems = 0;
 // checks); teleClient is always created (UDP by default).
 FileLogger* logger = 0;
 TeleClient* teleClient = 0;
+
+// FCM patch (from soshial/traccar_integration f5c052c): the newest telemetry
+// frame, kept serialized so the standby ping-back can report the last known
+// position while the vehicle is parked. Written by the loop task in process(),
+// read by the telemetry task only during STATE_STANDBY — the loop task never
+// runs process() in standby, so the two never overlap.
+CStorageRAM latestLocationStore;
 
 #if ENABLE_OLED
 OLED_SH1106 oled;
@@ -746,6 +762,11 @@ void process()
   if (batteryVoltage) {
     uint16_t v = batteryVoltage * 100;
     buffer->add(PID_BATTERY_VOLTAGE, ELEMENT_UINT16, &v, sizeof(v));
+    // FCM patch (from soshial/traccar_integration 36dba09): ignition flag
+    // derived from charging voltage. Traccar receives it as attribute io146;
+    // map it with a computed attribute (ignition = io146 == 1).
+    uint8_t ign = batteryVoltage > fcmJumpstartV ? 1 : 0;
+    buffer->add(PID_IGNITION, ELEMENT_UINT8, &ign, sizeof(ign));
   }
 #endif
 
@@ -778,7 +799,12 @@ void process()
   if (!state.check(STATE_MEMS_READY)) {
     deviceTemp = readChipTemperature();
   }
-  buffer->add(PID_DEVICE_TEMP, ELEMENT_INT32, &deviceTemp, sizeof(deviceTemp));
+  // FCM patch (from soshial/traccar_integration 95fdefe): Traccar's decoder
+  // divides PID 0x82 by 10, so the wire value must be tenths of a degree —
+  // sending whole degrees made 25°C display as 2.5°C. deviceTemp itself stays
+  // in whole °C (cooling check + BLE TEMP query use it raw).
+  int deviceTempX10 = deviceTemp * 10;
+  buffer->add(PID_DEVICE_TEMP, ELEMENT_INT32, &deviceTempX10, sizeof(deviceTempX10));
 
   buffer->timestamp = millis();
   buffer->state = BUFFER_STATE_FILLED;
@@ -788,6 +814,13 @@ void process()
     bufman.printStats();
     lastStatsTime = startTime;
   }
+
+  // FCM patch (f5c052c): snapshot this frame for the standby ping-back.
+  latestLocationStore.purge();
+  if (fcmProto == PROTOCOL_UDP) latestLocationStore.header(devid);
+  latestLocationStore.timestamp(buffer->timestamp);
+  buffer->serialize(latestLocationStore);
+  latestLocationStore.tailer();
 
   if (logger && state.check(STATE_STORAGE_READY)) {
     buffer->serialize(*logger);
@@ -963,6 +996,10 @@ void telemetry(void* inst)
         if (teleClient->wifiClient()->setup()) {
           Serial.println("[WIFI] Ping...");
           teleClient->ping();
+          // FCM patch (f5c052c): report the last known position with the ping.
+          if (latestLocationStore.length()) {
+            teleClient->transmit(latestLocationStore.buffer(), latestLocationStore.length());
+          }
         }
         else
 #endif
@@ -970,6 +1007,10 @@ void telemetry(void* inst)
           if (initCell()) {
             Serial.println("[CELL] Ping...");
             teleClient->ping();
+            // FCM patch (f5c052c): report the last known position with the ping.
+            if (latestLocationStore.length()) {
+              teleClient->transmit(latestLocationStore.buffer(), latestLocationStore.length());
+            }
           }
         }
         teleClient->shutdown();
@@ -1508,6 +1549,14 @@ void setup()
   showSysInfo();
 
   bufman.init();
+  latestLocationStore.init(
+#if BOARD_HAS_PSRAM
+    (char*)heap_caps_malloc(SERIALIZE_BUFFER_SIZE, MALLOC_CAP_SPIRAM),
+#else
+    (char*)malloc(SERIALIZE_BUFFER_SIZE),
+#endif
+    SERIALIZE_BUFFER_SIZE
+  );
   
   //Serial.print(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >> 10);
   //Serial.println("KB");

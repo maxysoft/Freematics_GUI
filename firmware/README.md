@@ -112,6 +112,18 @@ Live queries read the telelogger's own globals (`batteryVoltage`, `rssi`, `gd`,
 `netop`, the connection-time `ip`, …). `NET_IP` returns the **cached** IP rather than
 calling the modem's blocking `getIP()`, so a down modem can't stall the serial link.
 
+## Traccar integration (ported from soshial/Freematics `traccar_integration`)
+
+- **Device temperature** (PID 0x82) is sent in tenths of a degree — Traccar's
+  decoder divides by 10, so raw degrees displayed as one-tenth the real value.
+- **Ignition flag** (PID 0x92, from charging voltage vs the configured
+  jump-start threshold) arrives in Traccar as attribute `io146` — map it with a
+  computed attribute: `ignition = io146 == 1`.
+- **Fuel level** (PID 0x2F, lowest-frequency OBD tier) arrives as `io303`.
+- **Last-known position with ping-backs**: a parked device transmits its most
+  recent telemetry frame together with each standby ping, so Traccar keeps a
+  current position while the vehicle sits.
+
 ## Build (Docker only)
 
 ```bash
